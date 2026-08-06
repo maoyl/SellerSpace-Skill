@@ -1,6 +1,6 @@
 # SellerSpace Ads Audit Direct API Contract
 
-The bundled CLI calls the SellerSpace read-only analysis APIs directly with `X-API-Key`. It never sends JSON-RPC `tools/call` requests to MCP. Business response payloads are preserved; credential-like fields are recursively removed.
+The bundled CLI calls the SellerSpace read-only analysis APIs directly with `X-API-Key`. It never sends JSON-RPC `tools/call` requests to MCP. Business values are preserved; credential-like fields are recursively removed. To prevent agents from guessing through the backend's nested envelope, only `query_ads` is structurally normalized.
 
 ## Actual endpoints
 
@@ -42,6 +42,15 @@ The CLI always sends exact enabled-state filters and rejects caller-supplied sta
 - `searchQuery`: `campaignStatus=enabled`, `adGroupStatus=enabled` (search terms have no leaf state).
 
 Defaults: `dateType=NM`, `page=1`, `pageSize=100`, `orderByField=cost`, `orderType=2`. Page size cannot exceed the backend maximum of 100.
+
+The CLI validates the real backend shape `response.data.list.items` and returns one unambiguous structure:
+
+- aggregate metrics: `data.summary`
+- fetched rows: `data.page.items`
+- backend total: `data.page.totalCount`
+- pagination: `data.page.currentPage` and `data.page.pageCount`
+
+Envelope metadata and non-list business fields remain under `data`. The old nested paths `data.data` and `data.list` do not exist in the CLI result. Missing or malformed pagination fields fail with `INVALID_RESPONSE`; never infer counts from another path.
 
 ## get_metric_history
 

@@ -12,7 +12,7 @@
     "header": "X-API-Key",
     "storage": "local-only"
   },
-  "responsePolicy": "raw-business-response-with-credential-redaction",
+  "responsePolicy": "normalized-ads-page-with-credential-redaction",
   "operations": [
     {
       "name": "get_stores",

@@ -350,7 +350,44 @@ async function callOperation(operation, input, apiKey) {
     operation,
     transport: "direct-https",
     request: describeRequest(request),
-    data: redactCredentials(response),
+    data: normalizeOperationResponse(operation, redactCredentials(response)),
+  };
+}
+
+function normalizeOperationResponse(operation, response) {
+  if (operation !== "query_ads") return response;
+  return normalizeAdsResponse(response);
+}
+
+function normalizeAdsResponse(response) {
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    fail("INVALID_RESPONSE", "SellerSpace 广告接口返回的响应信封无效。", 1);
+  }
+  const payload = response.data;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    fail("INVALID_RESPONSE", "SellerSpace 广告接口缺少 data 对象。", 1);
+  }
+  const list = payload.list;
+  if (!list || typeof list !== "object" || Array.isArray(list) || !Array.isArray(list.items)) {
+    fail("INVALID_RESPONSE", "SellerSpace 广告接口缺少 data.list.items 数组。", 1);
+  }
+  for (const field of ["totalCount", "pageCount", "currentPage"]) {
+    if (!Number.isSafeInteger(list[field]) || list[field] < 0) {
+      fail("INVALID_RESPONSE", `SellerSpace 广告接口的 data.list.${field} 无效。`, 1);
+    }
+  }
+
+  const envelope = Object.fromEntries(
+    Object.entries(response).filter(([key]) => key !== "data"),
+  );
+  const payloadFields = Object.fromEntries(
+    Object.entries(payload).filter(([key]) => key !== "summary" && key !== "list"),
+  );
+  return {
+    ...envelope,
+    ...payloadFields,
+    summary: payload.summary ?? null,
+    page: { ...list, items: list.items },
   };
 }
 
