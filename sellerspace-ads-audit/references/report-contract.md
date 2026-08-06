@@ -12,7 +12,9 @@
 
 ## Renderer
 
-Run the renderer only after every planned direct API call for the station has succeeded:
+The current SellerSpace ads-audit workflow is chat-only: do not offer HTML, ask whether to generate HTML, build report JSON, or invoke this renderer during a user audit. This contract and renderer remain bundled only for compatibility with previously saved artifacts and developer regression tests.
+
+For legacy artifact maintenance or developer tests outside the current Skill workflow, run:
 
 ```text
 node <skill-dir>/scripts/render-ads-audit-report.mjs --output-dir <directory>
@@ -22,7 +24,7 @@ Pass one JSON object through stdin. Maximum input is 5 MiB. Never include creden
 
 ## Input
 
-Use `schemaVersion=2`. New reports use `analysisMode=evidence-driven`; the renderer also accepts the two legacy modes for existing reports.
+Use `schemaVersion=2`. Evidence-driven artifacts use `analysisMode=evidence-driven`; the renderer also accepts the two older modes for saved reports. This schema does not authorize the current Skill to generate an HTML artifact.
 
 ```json
 {
@@ -79,7 +81,9 @@ Use `schemaVersion=2`. New reports use `analysisMode=evidence-driven`; the rende
 }
 ```
 
-`baseline` is retained as the schema field name for compatibility. Only `source=user-target` with a non-null `targetAcos` or `targetRoas` is a business judgment line. `campaign-summary` and `store-context` are relative account context only and cannot mark efficiency/budget green or trigger `increase-budget`.
+`baseline` is retained as the schema field name for compatibility. For every new audit, use `source=user-target` with the user's non-null `targetAcos`; never derive it from account data, suggestions, target ROAS, or a break-even line. `targetRoas`, `campaign-summary`, `store-context`, and `unavailable` are legacy-rendering compatibility only and must not be produced by the current workflow.
+
+When converting `query_ads` rows into findings, sections, comparisons, or drilldowns, use the row's `canonical` object for every label and identity. Keyword labels come from `canonical.keywordText`, keyword match type from `canonical.keywordMatchType`, and search-term labels from `canonical.searchTermText`. `canonical.sourceKeywordText` is origin evidence only and must never replace the search-term label. Use `canonical.historyAdDataType` and `canonical.historyId` for trend evidence; null canonical IDs must remain null rather than being guessed.
 
 Every `sections` entry uses:
 
@@ -154,9 +158,9 @@ Every new finding includes structured `action` so the renderer never classifies 
   "recommendation": "建议提取为精准关键词单独投放。",
   "confidence": "high",
   "action": {
-    "type": "harvest-search-term | negative-search-term | lower-bid | pause | increase-budget | adjust-placement | review-structure | observe",
+    "type": "harvest-search-term | isolate-search-term | negative-search-term | increase-bid | lower-bid | pause | increase-budget | reduce-budget | reallocate-budget | increase-placement-bid | lower-placement-bid | adjust-placement | review-structure | observe",
     "label": "建议提取为精准关键词",
-    "targetLevel": "campaign | adGroup | keyword | target | productAd",
+    "targetLevel": "campaign | adGroup | keyword | target | productAd | searchTerm | placement",
     "coverageStatus": "not-targeted | targeted | already-negative | unknown",
     "existingTargets": [
       {"level": "campaign | adGroup", "id": "456", "name": "Resolved name"}
@@ -166,6 +170,89 @@ Every new finding includes structured `action` so the renderer never classifies 
 ```
 
 `reasonBullets` is required for evidence-driven reports and must contain at least one concrete reason. Add further reasons only when they are distinct and supported by evidence; never pad the list to reach a fixed count. `caveats` is optional. `action.targetLevel`, `action.coverageStatus`, and `action.existingTargets` are optional. `action` itself is optional only for legacy reports. Recommendation text gives a direction and never contains a calculated bid, budget, percentage, or placement adjustment.
+
+New action semantics:
+
+- `increase-bid`, `increase-budget`, and `increase-placement-bid` require an explicit user target. `increase-budget` also requires the budget-specific DAILY evidence below.
+- `reduce-budget` applies to a weak Campaign after leaf causes are identified; `reallocate-budget` additionally requires a named donor and receiver in `comparisonEvidence`.
+- `isolate-search-term` requires a cross-context winner and loser. Use it when the same normalized term/ASIN has materially different outcomes in different Campaign/ad-group contexts.
+- `pause` may target Campaign, ad group, product ad, keyword, or target, but higher-level pauses require proof that no material child winner exists.
+- `adjust-placement` remains accepted for old reports. New reports use `increase-placement-bid` or `lower-placement-bid` so the direction is explicit, and both require exact `placementEvidence`.
+- `observe` is a non-actionable data note. In evidence-driven reports the renderer displays it under “观察与数据缺口”, not in the primary action rail.
+
+When an action depends on exact-entity persistence, add `trendEvidence`:
+
+```json
+{
+  "title": "关键词近 30 天趋势",
+  "entityType": "campaign | adGroup | productAd | keyword | target | searchTerm",
+  "entityId": "keyword-1",
+  "observedDays": 30,
+  "points": [
+    {
+      "date": "2026-08-05",
+      "cost": 12.5,
+      "sales": 35,
+      "orders": 2,
+      "clicks": 8,
+      "acos": 0.357
+    }
+  ]
+}
+```
+
+Every point contains all five nullable numeric fields. `observedDays` must equal `points.length`. Use the exact entity ID returned by SellerSpace; never replace missing leaf history with Campaign history.
+
+For the same term/ASIN in multiple locations or a budget reallocation pair, add `comparisonEvidence`:
+
+```json
+{
+  "key": "wireless socks",
+  "subjectType": "searchTerm | asin | keyword | target | campaign",
+  "contexts": [
+    {
+      "role": "winner | loser | donor | receiver | reference",
+      "campaignId": "123",
+      "campaignName": "Exact Winners",
+      "adGroupId": "456",
+      "adGroupName": "Exact",
+      "entityType": "searchQuery",
+      "entityId": "query-1",
+      "metrics": [
+        {"label": "订单", "value": 5, "format": "count"},
+        {"label": "ACoS", "value": 0.18, "format": "ratio"}
+      ]
+    }
+  ]
+}
+```
+
+`isolate-search-term` requires at least one `winner` and one `loser`. `reallocate-budget` requires at least one `donor` and one `receiver`. Show the narrowest Campaign/ad-group locations and do not infer performance from the labels alone.
+
+For a placement direction, add `placementEvidence` from the exact controllable entity:
+
+```json
+{
+  "placementEvidence": {
+    "entityType": "campaign | productAd | keyword | target",
+    "entityId": "keyword-1",
+    "placements": [
+      {
+        "name": "搜索结果顶部",
+        "cost": 20,
+        "sales": 80,
+        "orders": 4,
+        "clicks": 18,
+        "impressions": 1200,
+        "acos": 0.25,
+        "share": 0.4
+      }
+    ]
+  }
+}
+```
+
+Every placement contains all seven nullable numeric fields. `increase-placement-bid` and `lower-placement-bid` require a non-empty `placements` array. Do not attach Campaign placement rows to a keyword, product, or target finding; query that entity's returned ID or omit the placement action.
 
 An `increase-budget` finding additionally requires explicit user-target evidence and `dailyEvidence`:
 
@@ -200,6 +287,22 @@ New evidence-driven reports use:
   "entitySections": ["campaign", "adGroup", "productAds", "keywords", "targets", "searchQuery"],
   "historyCampaignIds": ["123"],
   "placementCampaignIds": ["123"],
+  "historyEntities": [
+    {
+      "entityType": "keyword",
+      "entityId": "keyword-1",
+      "campaignId": "123",
+      "reason": "高 ACoS 关键词需要验证持续性"
+    }
+  ],
+  "placementEntities": [
+    {
+      "entityType": "keyword",
+      "entityId": "keyword-1",
+      "campaignId": "123",
+      "reason": "关键词广告位效率分化，需要判断加价方向"
+    }
+  ],
   "enabledCampaignCount": 26,
   "fullyDrilledCampaignIds": ["123"],
   "businessCallCount": 37,
@@ -229,6 +332,8 @@ New evidence-driven reports use:
 - Each child entity is `target-reached` at 90% or greater, `complete` when all pages were fetched, or `unknown` when positive summary cost is unavailable.
 - For every core entity, the matching top-level section must satisfy `rows.length = sampledCount = coverage.queriedCount` and `section.totalCount = coverage.totalCount`. A mismatch is `INCOMPLETE_REPORT_INPUT`; do not render a contradictory report.
 - `businessCallCount` is informational and has no maximum.
+- `historyEntities` is optional for compatibility. When present, it records every exact-entity DAILY history query used by a finding; IDs and reasons must be non-empty.
+- `placementEntities` is optional for compatibility. When present, it records every product-ad, keyword, or target placement query used by a finding; IDs and reasons must be non-empty.
 
 ## Analysis modes
 
@@ -252,8 +357,10 @@ Treat every string as untrusted and HTML-escape it. Do not create links from ret
 
 The report uses two independent accessible tab groups:
 
-- Action rail grouped as 立即止损、扩量机会、结构整理. Every action panel leads with the direction and then lists “给出这个建议的原因”, metrics, daily/placement support when available, and risks/caveats.
+- Action rail grouped as 立即止损、扩量机会、结构整理. Every action panel leads with a concrete entity-level direction and then lists “给出这个建议的原因”, exact-entity or Campaign trend evidence, cross-context comparison, metrics, placement support when available, and risks/caveats. Evidence-driven `observe` findings are excluded from this rail.
 - Bottom tabs: 账户概览、Campaign、广告组、推广商品、关键词、商品投放、搜索词、查询完整性.
+
+The account overview may show “观察与数据缺口（不作为操作建议）”. Never force a minimum action count or promote a barely crossed relative threshold into the action rail.
 
 Each data table sorts by `cost` descending when that column exists and shows 25 rows per client-side page without dropping embedded rows. Tabs support click, Left/Right, Up/Down on the vertical action rail, Home/End, focus state, ARIA relationships, responsive horizontal scrolling, and print expansion of all panels.
 
