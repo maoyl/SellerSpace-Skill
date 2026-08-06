@@ -512,7 +512,7 @@ function renderReport(report, logo) {
         ? renderCampaignDossiers(report)
         : `${renderSectionTable(campaignSection, report.scope.currency)}${renderPortfolioSections(portfolioSections, report.scope.currency)}`}
     </section>
-    <footer class="footer"><span>由 SellerSpace MCP 只读数据生成</span><span>未执行任何广告修改 · 明细样本按花费降序</span></footer>
+    <footer class="footer"><span>由 SellerSpace 实际只读接口数据生成</span><span>未执行任何广告修改 · 明细样本按花费降序</span></footer>
   </article>
 </main>
 </body>

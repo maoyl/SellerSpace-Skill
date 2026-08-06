@@ -5,37 +5,100 @@
   "minimumSkillVersion": "1.0.0",
   "minimumNodeVersion": "22.0.0",
   "accessMode": "read-only",
-  "contractHash": "a43a51a9cbc6fbd26443f9c1c04e306366e4cf37871195960b107bef5f1d90a0",
+  "transport": "direct-https",
+  "baseUrl": "https://www.sellerspace.com",
+  "authentication": {
+    "type": "api-key",
+    "header": "X-API-Key",
+    "storage": "local-only"
+  },
+  "responsePolicy": "raw-business-response-with-credential-redaction",
   "operations": [
     {
       "name": "get_stores",
-      "category": "discovery",
-      "readOnly": true,
-      "destructive": false
-    },
-    {
-      "name": "discover_fields",
-      "category": "discovery",
       "readOnly": true,
       "destructive": false
     },
     {
       "name": "query_ads",
-      "category": "query",
       "readOnly": true,
       "destructive": false
     },
     {
       "name": "query_store_performance",
-      "category": "query",
       "readOnly": true,
       "destructive": false
     },
     {
       "name": "get_metric_history",
-      "category": "query",
       "readOnly": true,
       "destructive": false
+    }
+  ],
+  "endpoints": [
+    {
+      "operation": "get_stores",
+      "method": "GET",
+      "path": "/api/mcp/analysis/stores"
+    },
+    {
+      "operation": "query_store_performance",
+      "method": "GET",
+      "path": "/api/mcp/analysis/website"
+    },
+    {
+      "operation": "query_ads",
+      "entity": "campaign",
+      "method": "POST",
+      "path": "/api/mcp/analysis/cpc/campaigns/page"
+    },
+    {
+      "operation": "query_ads",
+      "entity": "adGroup",
+      "method": "POST",
+      "path": "/api/mcp/analysis/cpc/adGroups/page"
+    },
+    {
+      "operation": "query_ads",
+      "entity": "productAds",
+      "method": "POST",
+      "path": "/api/mcp/analysis/cpc/product_ads/page"
+    },
+    {
+      "operation": "query_ads",
+      "entity": "keywords",
+      "method": "POST",
+      "path": "/api/mcp/analysis/cpc/keywords/page"
+    },
+    {
+      "operation": "query_ads",
+      "entity": "targets",
+      "method": "POST",
+      "path": "/api/mcp/analysis/cpc/targets/page"
+    },
+    {
+      "operation": "query_ads",
+      "entity": "searchQuery",
+      "method": "POST",
+      "path": "/api/mcp/analysis/cpc/keywords_query/page"
+    },
+    {
+      "operation": "get_metric_history",
+      "entity": "time",
+      "method": "GET",
+      "path": "/api/mcp/analysis/cpc/common/metric/analysis"
+    },
+    {
+      "operation": "get_metric_history",
+      "entity": "placement",
+      "method": "GET",
+      "path": "/api/mcp/analysis/cpc/common/placement"
+    },
+    {
+      "operation": "get_metric_history",
+      "entity": "hourly",
+      "method": "GET",
+      "path": "/api/mcp/analysis/cpc/campaigns/analysis/hourly-stream"
     }
   ]
 }

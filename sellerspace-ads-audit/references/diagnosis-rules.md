@@ -10,25 +10,25 @@
 
 ## Query plan
 
-Use `period={preset:'NM'}` when the user omits a period. Keep one `sellerId + marketplace` per audit.
+Use `dateType=NM` when the user omits a period. Keep one `sellerId + marketplace` per audit.
 
-Query station context with `query_store_performance` and select station identity plus `orders`, `units`, `revenue`, `cpcCost`, `adCpcSales`, `adAcos`, `acoTs`, and `roas`.
+Query station context with `query_store_performance`. Read station identity plus `orders`, `units`, `revenue`, `cpcCost`, `adCpcSales`, `adAcos`, `acoTs`, and `roas` from the unprojected backend response when present.
 
-For every `query_ads` call, set `includeSummary=true`, `sort={field:'cost',direction:'desc'}`, and `page={number:1,size:50}`. Select identity fields plus the common metrics `impressions`, `clicks`, `cost`, `ctr`, `cpcOrder`, `cpcSales`, `acos`, `cpc`, `cvr`, `cpa`, and `roas`.
+For every `query_ads` call, use `orderByField=cost`, `orderType=2`, `page=1`, and `pageSize=50`. The direct client returns the backend response without business-field projection; read the relevant identity and metric fields from it when present.
 
-Apply these entity-specific fields and status filters. The audit scope is enabled inventory only; never use `notArchived` for the campaign audit:
+The audit scope is enabled inventory only. The direct client owns these exact backend status filters, rejects caller overrides, and never uses `notArchived`:
 
-- `campaign`: include `campaignId`, `campaignName`, `adType`, `campaignStatus`, `dailyBudget`, `costBudgetPercent`, `suggestedBudget`, `placementTop`, `placementDetail`, `placementOther`, and `placementBusiness`; use `status=enabled`.
-- `adGroup`: include `adGroupId`, `adGroupName`, `campaignId`, `campaignName`, `adType`, `adGroupStatus`, `defaultBid`, and `bid`; use `status=enabled` and `campaignStatus=enabled`.
-- `productAds`: include `asin`, `sellerSku`, `productTitle`, `campaignId`, `campaignName`, `adGroupId`, `adGroupName`, `adType`, `status`, `bid`, `suggestedBid`, and `defaultBid`; use `status=enabled`, `campaignStatus=enabled`, and `adGroupStatus=enabled`.
-- `keywords`: include `keywordId`, `keywordsText`, `matchType`, parent identities, statuses, `bid`, and `suggestedBid`; use the full enabled chain.
-- `targets`: include `targetId`, `targetExpression`, `targetValue`, parent identities, statuses, `bid`, `suggestedBid`, and `defaultBid`; use the full enabled chain.
-- `searchQuery`: include `query`, `queryText`, `queryIsAsin`, parent identities, `positiveCampaignIdList`, `positiveAdGroupIdList`, `negativeCampaignIdList`, `negativeAdGroupIdList`, `searchTermImpressionRank`, and `searchTermImpressionShare`; use `campaignStatus=enabled` and `adGroupStatus=enabled`.
+- `campaign`: `campaignStatus=enabled`.
+- `adGroup`: `campaignStatus=enabled` and `adGroupStatus=enabled`.
+- `productAds`, `keywords`, and `targets`: `campaignStatus=enabled`, `adGroupStatus=enabled`, and `status=enabled`.
+- `searchQuery`: `campaignStatus=enabled` and `adGroupStatus=enabled`; search terms have no leaf status.
+
+Use the corresponding backend identity and evidence fields when present: campaign budget/placement fields; ad group default bid; product ASIN/SKU; keyword text/match type; target expression/value; and search-query positive/negative lists plus impression rank/share.
 
 Choose exactly one query mode after the enabled campaign query succeeds:
 
-- `campaign-drilldown`: enabled campaign `totalCount` is 0 to 3. For each returned campaign, query all five child entities with `criteria.campaignId=<campaignId>` and the status filters above. Query DAILY history for each campaign and placement history for each SP campaign. The hard limit is 24 business MCP calls per station. Do not run duplicate portfolio-wide child queries.
-- `portfolio-sample`: enabled campaign `totalCount` is greater than 3. Query each child entity once across the station, then query DAILY history for at most three selected campaigns and placement history for at most two selected SP campaigns. The hard limit is 13 business MCP calls per station.
+- `campaign-drilldown`: enabled campaign `totalCount` is 0 to 3. For each returned campaign, query all five child entities with `campaignId=<campaignId>`. Query DAILY history for each campaign and placement history for each SP campaign. The hard limit is 24 business direct API calls per station. Do not run duplicate portfolio-wide child queries.
+- `portfolio-sample`: enabled campaign `totalCount` is greater than 3. Query each child entity once across the station, then query DAILY history for at most three selected campaigns and placement history for at most two selected SP campaigns. The hard limit is 13 business direct API calls per station.
 
 If the enabled campaign count is zero, produce an empty enabled-scope report without child, history, or placement calls. In campaign-drilldown mode, “fully drilled” means every enabled campaign received the planned calls. It does not override the 50-row sample cap within a child entity.
 

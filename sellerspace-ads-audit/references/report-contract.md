@@ -10,7 +10,7 @@
 
 ## Renderer
 
-Run the renderer only after every planned MCP call for the station has succeeded:
+Run the renderer only after every planned direct API call for the station has succeeded:
 
 ```text
 node <skill-dir>/scripts/render-ads-audit-report.mjs --output-dir <directory>

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
@@ -13,11 +13,80 @@ const scriptDir = dirname(scriptPath);
 const skillDir = resolve(scriptDir, "..");
 const contractPath = resolve(skillDir, "references", "contract.json");
 const setupPagePath = resolve(skillDir, "assets", "configure.html");
-const DEFAULT_MCP_URL = "https://www.sellerspace.com/mcp/";
-const DEFAULT_API_KEY_VALIDATION_URL =
-  "https://www.sellerspace.com/api/mcp/analysis/profile";
+const DEFAULT_API_BASE_URL = "https://www.sellerspace.com";
+const PROFILE_PATH = "/api/mcp/analysis/profile";
 const DEFAULT_SETUP_TTL_MS = 10 * 60 * 1000;
 const LEGACY_CONFIG_DIR = resolve(homedir(), ".sellerspace-operator");
+const ALLOWED_OPERATION_NAMES = [
+  "get_stores",
+  "query_ads",
+  "query_store_performance",
+  "get_metric_history",
+];
+const DIRECT_ENDPOINTS = [
+  { operation: "get_stores", method: "GET", path: "/api/mcp/analysis/stores" },
+  { operation: "query_store_performance", method: "GET", path: "/api/mcp/analysis/website" },
+  { operation: "query_ads", entity: "campaign", method: "POST", path: "/api/mcp/analysis/cpc/campaigns/page" },
+  { operation: "query_ads", entity: "adGroup", method: "POST", path: "/api/mcp/analysis/cpc/adGroups/page" },
+  { operation: "query_ads", entity: "productAds", method: "POST", path: "/api/mcp/analysis/cpc/product_ads/page" },
+  { operation: "query_ads", entity: "keywords", method: "POST", path: "/api/mcp/analysis/cpc/keywords/page" },
+  { operation: "query_ads", entity: "targets", method: "POST", path: "/api/mcp/analysis/cpc/targets/page" },
+  { operation: "query_ads", entity: "searchQuery", method: "POST", path: "/api/mcp/analysis/cpc/keywords_query/page" },
+  { operation: "get_metric_history", entity: "time", method: "GET", path: "/api/mcp/analysis/cpc/common/metric/analysis" },
+  { operation: "get_metric_history", entity: "placement", method: "GET", path: "/api/mcp/analysis/cpc/common/placement" },
+  { operation: "get_metric_history", entity: "hourly", method: "GET", path: "/api/mcp/analysis/cpc/campaigns/analysis/hourly-stream" },
+];
+const ADS_ENTITY_CONFIG = {
+  campaign: {
+    path: "/api/mcp/analysis/cpc/campaigns/page",
+    enabledFilters: { campaignStatus: "enabled" },
+  },
+  adGroup: {
+    path: "/api/mcp/analysis/cpc/adGroups/page",
+    enabledFilters: { campaignStatus: "enabled", adGroupStatus: "enabled" },
+  },
+  productAds: {
+    path: "/api/mcp/analysis/cpc/product_ads/page",
+    enabledFilters: {
+      campaignStatus: "enabled",
+      adGroupStatus: "enabled",
+      status: "enabled",
+    },
+  },
+  keywords: {
+    path: "/api/mcp/analysis/cpc/keywords/page",
+    enabledFilters: {
+      campaignStatus: "enabled",
+      adGroupStatus: "enabled",
+      status: "enabled",
+    },
+  },
+  targets: {
+    path: "/api/mcp/analysis/cpc/targets/page",
+    enabledFilters: {
+      campaignStatus: "enabled",
+      adGroupStatus: "enabled",
+      status: "enabled",
+    },
+  },
+  searchQuery: {
+    path: "/api/mcp/analysis/cpc/keywords_query/page",
+    enabledFilters: { campaignStatus: "enabled", adGroupStatus: "enabled" },
+  },
+};
+const DATE_TYPES = new Set(["TD", "YD", "WD", "LW", "MO", "LM", "SD", "HD", "NM", "CU"]);
+const STORE_SENSITIVE_FIELDS = new Set([
+  "mwsAuthToken",
+  "adAuthCode",
+  "adAuthScope",
+  "mailBoxList",
+  "apiKey",
+  "accessToken",
+  "refreshToken",
+  "authorization",
+  "password",
+  "secret",
+]);
 
 class CliFailure extends Error {
   constructor(payload, exitCode = 1) {
@@ -111,7 +180,7 @@ function validateBundledContract(contract) {
   if (!contract || typeof contract !== "object" || Array.isArray(contract)) {
     throw new Error("contract.json 必须是 JSON 对象。");
   }
-  for (const field of ["skill", "skillVersion", "contractHash", "accessMode"]) {
+  for (const field of ["skill", "skillVersion", "accessMode", "transport", "baseUrl"]) {
     if (typeof contract[field] !== "string" || !contract[field].trim()) {
       throw new Error(`contract.json 缺少有效字段：${field}`);
     }
@@ -125,11 +194,14 @@ function validateBundledContract(contract) {
   if (contract.minimumSkillVersion !== contract.skillVersion) {
     throw new Error("contract.json 的 Skill 版本字段不一致。");
   }
-  if (!/^[a-f0-9]{64}$/.test(contract.contractHash)) {
-    throw new Error("contract.json 的 contractHash 无效。");
-  }
   if (contract.accessMode !== "read-only") {
     throw new Error("此运行时仅允许 read-only Skill 契约。");
+  }
+  if (contract.transport !== "direct-https") {
+    throw new Error("此运行时仅允许 direct-https 契约。");
+  }
+  if (contract.baseUrl !== DEFAULT_API_BASE_URL) {
+    throw new Error("contract.json 的 SellerSpace baseUrl 无效。");
   }
   if (!Array.isArray(contract.operations) || contract.operations.length === 0) {
     throw new Error("contract.json 必须声明至少一个 operation。");
@@ -149,6 +221,12 @@ function validateBundledContract(contract) {
       }
     }
   }
+  if (JSON.stringify([...names]) !== JSON.stringify(ALLOWED_OPERATION_NAMES)) {
+    throw new Error("contract.json 的只读 operation 集合无效。");
+  }
+  if (JSON.stringify(contract.endpoints) !== JSON.stringify(DIRECT_ENDPOINTS)) {
+    throw new Error("contract.json 的实际接口白名单无效。");
+  }
 }
 
 function resolveConfigurationDirectory() {
@@ -162,9 +240,6 @@ async function preflight() {
   const credential = await requireCredential();
   await withCredentialRecovery(credential, async (apiKey) => {
     await validateApiKey(apiKey);
-    await requestMcp("ping", {}, apiKey);
-    const result = await requestMcp("tools/list", {}, apiKey);
-    validateLiveContract(result);
   });
   print({
     ok: true,
@@ -172,10 +247,11 @@ async function preflight() {
     skill: bundledContract.skill,
     skillVersion: bundledContract.skillVersion,
     accessMode: bundledContract.accessMode,
-    mcpReachable: true,
+    transport: bundledContract.transport,
+    apiReachable: true,
     apiKeyValid: true,
     requiredOperations: bundledContract.operations.map(({ name }) => name),
-    contractHash: bundledContract.contractHash,
+    endpointCount: bundledContract.endpoints.length,
     credentialSource: credential.source,
   });
 }
@@ -202,48 +278,6 @@ function compareVersions(left, right) {
   return 0;
 }
 
-function validateLiveContract(result) {
-  if (!Array.isArray(result?.tools)) {
-    fail("INVALID_TOOLS_LIST", "MCP tools/list 响应缺少 tools 数组。", 1);
-  }
-  const liveTools = new Map(
-    result.tools
-      .filter((tool) => tool && typeof tool.name === "string")
-      .map((tool) => [tool.name, tool]),
-  );
-  for (const operation of bundledContract.operations) {
-    const live = liveTools.get(operation.name);
-    if (!live) {
-      fail(
-        "REQUIRED_OPERATION_UNAVAILABLE",
-        `SellerSpace MCP 缺少必需 operation：${operation.name}`,
-        1,
-      );
-    }
-    if (!live.inputSchema || typeof live.inputSchema !== "object" || Array.isArray(live.inputSchema)) {
-      fail(
-        "MCP_CONTRACT_INCOMPATIBLE",
-        `SellerSpace MCP operation 缺少有效 inputSchema：${operation.name}`,
-        1,
-      );
-    }
-    if (bundledContract.accessMode === "read-only") {
-      const annotations = live.annotations;
-      if (
-        !annotations
-        || annotations.readOnlyHint !== true
-        || annotations.destructiveHint === true
-      ) {
-        fail(
-          "READ_ONLY_CONTRACT_VIOLATION",
-          `SellerSpace MCP operation 未满足只读注解要求：${operation.name}`,
-          1,
-        );
-      }
-    }
-  }
-}
-
 function readLocalContract() {
   return {
     ok: true,
@@ -251,8 +285,10 @@ function readLocalContract() {
     skillVersion: bundledContract.skillVersion,
     apiVersion: bundledContract.apiVersion,
     accessMode: bundledContract.accessMode,
-    contractHash: bundledContract.contractHash,
+    transport: bundledContract.transport,
+    baseUrl: bundledContract.baseUrl,
     operations: bundledContract.operations.map((operation) => ({ ...operation })),
+    endpoints: bundledContract.endpoints.map((endpoint) => ({ ...endpoint })),
   };
 }
 
@@ -307,211 +343,485 @@ async function configure() {
 }
 
 async function callOperation(operation, input, apiKey) {
-  const response = await requestMcp("tools/call", {
-    name: operation,
-    arguments: input,
-  }, apiKey);
-  return normalizeMcpToolResult(operation, response);
+  const request = buildOperationRequest(operation, input);
+  const response = await requestDirectApi(request, apiKey);
+  return {
+    ok: true,
+    operation,
+    transport: "direct-https",
+    request: describeRequest(request),
+    data: redactCredentials(response),
+  };
 }
 
-async function requestMcp(method, params, apiKey) {
-  const mcpUrl = normalizeMcpUrl(
-    process.env.SELLERSPACE_MCP_URL?.trim() || DEFAULT_MCP_URL,
+function buildOperationRequest(operation, input) {
+  assertPlainInput(input);
+  switch (operation) {
+    case "get_stores":
+      return buildStoresRequest(input);
+    case "query_ads":
+      return buildAdsRequest(input);
+    case "query_store_performance":
+      return buildStorePerformanceRequest(input);
+    case "get_metric_history":
+      return buildMetricHistoryRequest(input);
+    default:
+      rejectReadOnlyOperation(operation);
+  }
+}
+
+function buildStoresRequest(input) {
+  assertAllowedKeys(input, [], "get_stores");
+  return { method: "GET", path: "/api/mcp/analysis/stores", query: {} };
+}
+
+function buildStorePerformanceRequest(input) {
+  assertAllowedKeys(input, [
+    "storeShortNameAndMarketplaces",
+    "dateType",
+    "fromDateStr",
+    "toDateStr",
+    "currencyCode",
+    "chainType",
+    "dimension",
+  ], "query_store_performance");
+  const stations = readStringArray(
+    input.storeShortNameAndMarketplaces,
+    "storeShortNameAndMarketplaces",
+    1,
+    20,
   );
+  const dateType = readEnum(input.dateType, "dateType", DATE_TYPES, "NM");
+  const fromDateStr = readOptionalDate(input.fromDateStr, "fromDateStr");
+  const toDateStr = readOptionalDate(input.toDateStr, "toDateStr");
+  validateDateWindow(dateType, fromDateStr, toDateStr);
+  const query = compactObject({
+    storeShortNameAndMarketplaces: stations,
+    dateType,
+    fromDateStr,
+    toDateStr,
+    currencyCode: readOptionalString(input.currencyCode, "currencyCode", 3, 8),
+    chainType: readEnum(
+      input.chainType,
+      "chainType",
+      new Set(["HOURLY", "DAILY", "WEEKLY", "MONTHLY"]),
+      "HOURLY",
+    ),
+    dimension: readEnum(
+      input.dimension,
+      "dimension",
+      new Set(["market", "store"]),
+      "market",
+    ),
+  });
+  return { method: "GET", path: "/api/mcp/analysis/website", query };
+}
+
+function buildAdsRequest(input) {
+  assertAllowedKeys(input, [
+    "entity",
+    "sellerId",
+    "marketplace",
+    "dateType",
+    "fromDateStr",
+    "toDateStr",
+    "adType",
+    "campaignId",
+    "adGroupId",
+    "page",
+    "pageSize",
+    "orderByField",
+    "orderType",
+  ], "query_ads");
+  const entity = readEnum(
+    input.entity,
+    "entity",
+    new Set(Object.keys(ADS_ENTITY_CONFIG)),
+  );
+  const config = ADS_ENTITY_CONFIG[entity];
+  const dateType = readEnum(input.dateType, "dateType", DATE_TYPES, "NM");
+  const fromDateStr = readOptionalDate(input.fromDateStr, "fromDateStr");
+  const toDateStr = readOptionalDate(input.toDateStr, "toDateStr");
+  validateDateWindow(dateType, fromDateStr, toDateStr);
+  const body = compactObject({
+    sellerId: readPositiveInteger(input.sellerId, "sellerId"),
+    marketplace: readRequiredString(input.marketplace, "marketplace", 2, 16),
+    dateType,
+    fromDateStr,
+    toDateStr,
+    adType: readOptionalEnum(input.adType, "adType", new Set(["SP", "SB", "SD"])),
+    campaignId: readOptionalString(input.campaignId, "campaignId", 1, 256),
+    adGroupId: readOptionalString(input.adGroupId, "adGroupId", 1, 256),
+    page: readInteger(input.page, "page", 1, 10_000, 1),
+    pageSize: readInteger(input.pageSize, "pageSize", 1, 50, 50),
+    orderByField: readEnum(
+      input.orderByField,
+      "orderByField",
+      new Set([
+        "cost",
+        "impressions",
+        "clicks",
+        "cpcSales",
+        "acos",
+        "roas",
+        "cpcOrder",
+        "cpa",
+        "cpc",
+        "ctr",
+        "cvr",
+      ]),
+      "cost",
+    ),
+    orderType: readInteger(input.orderType, "orderType", 1, 2, 2),
+    ...(entity === "searchQuery" ? { searchKeywordsType: "query" } : {}),
+    ...config.enabledFilters,
+  });
+  return { method: "POST", path: config.path, body };
+}
+
+function buildMetricHistoryRequest(input) {
+  assertAllowedKeys(input, [
+    "sellerId",
+    "marketplace",
+    "adDataType",
+    "id",
+    "dimension",
+    "timeType",
+    "placementBusiness",
+    "dateType",
+    "fromDateStr",
+    "toDateStr",
+  ], "get_metric_history");
+  const sellerId = readPositiveInteger(input.sellerId, "sellerId");
+  const marketplace = readRequiredString(input.marketplace, "marketplace", 2, 16);
+  const adDataType = readEnum(
+    input.adDataType,
+    "adDataType",
+    new Set(["campaign", "adGroup", "productAd", "keyword", "target", "searchTerm"]),
+  );
+  const id = readEntityId(input.id);
+  const dimension = readEnum(
+    input.dimension,
+    "dimension",
+    new Set(["time", "placement"]),
+    "time",
+  );
+  const timeType = readEnum(
+    input.timeType,
+    "timeType",
+    new Set(["DAILY", "WEEKLY", "WEEK", "MONTHLY", "HOURLY"]),
+    "DAILY",
+  );
+  const fromDateStr = readRequiredDate(input.fromDateStr, "fromDateStr");
+  const toDateStr = readRequiredDate(input.toDateStr, "toDateStr");
+  validateDateWindow("CU", fromDateStr, toDateStr);
+
+  if (dimension === "placement") {
+    const idParameter = {
+      campaign: "campaignId",
+      productAd: "adId",
+      keyword: "keywordId",
+      target: "keywordId",
+    }[adDataType];
+    if (!idParameter) {
+      fail(
+        "INVALID_INPUT",
+        "dimension=placement 仅支持 campaign/productAd/keyword/target。",
+        2,
+      );
+    }
+    return {
+      method: "GET",
+      path: "/api/mcp/analysis/cpc/common/placement",
+      query: {
+        sellerId,
+        marketplace,
+        placementBusiness: readEnum(
+          input.placementBusiness,
+          "placementBusiness",
+          new Set(["Y", "N"]),
+          "N",
+        ),
+        dateType: readEnum(input.dateType, "dateType", DATE_TYPES, "CU"),
+        fromDateStr,
+        toDateStr,
+        [idParameter]: id,
+      },
+    };
+  }
+
+  if (timeType === "HOURLY") {
+    const hourlyType = {
+      campaign: "adCampaign",
+      adGroup: "adGroup",
+      productAd: "advertisement",
+      keyword: "adKeyword",
+      target: "adTargetType",
+    }[adDataType];
+    if (!hourlyType) {
+      fail("INVALID_INPUT", "timeType=HOURLY 不支持 searchTerm。", 2);
+    }
+    return {
+      method: "GET",
+      path: "/api/mcp/analysis/cpc/campaigns/analysis/hourly-stream",
+      query: {
+        sellerId,
+        marketplace,
+        type: hourlyType,
+        id,
+        dateType: readEnum(input.dateType, "dateType", DATE_TYPES, "CU"),
+        hourlySummary: "Y",
+        fromDateStr,
+        toDateStr,
+      },
+    };
+  }
+
+  return {
+    method: "GET",
+    path: "/api/mcp/analysis/cpc/common/metric/analysis",
+    query: {
+      sellerId,
+      marketplace,
+      adDataType,
+      id,
+      timeType,
+      fromDateStr,
+      toDateStr,
+    },
+  };
+}
+
+function assertPlainInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    fail("INVALID_JSON_INPUT", "stdin JSON 必须是对象。", 2);
+  }
+}
+
+function assertAllowedKeys(input, allowedKeys, operation) {
+  const allowed = new Set(allowedKeys);
+  for (const key of Object.keys(input)) {
+    if (!allowed.has(key)) {
+      fail(
+        "UNSUPPORTED_INPUT_FIELD",
+        `${operation} 不接受字段 ${key}；URL、HTTP 方法和状态过滤由只读客户端固定。`,
+        2,
+      );
+    }
+  }
+}
+
+function compactObject(value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== ""),
+  );
+}
+
+function readRequiredString(value, name, minimumLength, maximumLength) {
+  if (typeof value !== "string") {
+    fail("INVALID_INPUT", `${name} 必须是字符串。`, 2);
+  }
+  const normalized = value.trim();
+  if (normalized.length < minimumLength || normalized.length > maximumLength) {
+    fail("INVALID_INPUT", `${name} 长度必须在 ${minimumLength}-${maximumLength} 之间。`, 2);
+  }
+  return normalized;
+}
+
+function readOptionalString(value, name, minimumLength, maximumLength) {
+  if (value === undefined) return undefined;
+  return readRequiredString(value, name, minimumLength, maximumLength);
+}
+
+function readStringArray(value, name, minimumLength, maximumLength) {
+  if (!Array.isArray(value) || value.length < minimumLength || value.length > maximumLength) {
+    fail("INVALID_INPUT", `${name} 必须包含 ${minimumLength}-${maximumLength} 个字符串。`, 2);
+  }
+  return value.map((item, index) => readRequiredString(item, `${name}[${index}]`, 3, 128));
+}
+
+function readPositiveInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    fail("INVALID_INPUT", `${name} 必须是正整数。`, 2);
+  }
+  return value;
+}
+
+function readInteger(value, name, minimum, maximum, fallback) {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    fail("INVALID_INPUT", `${name} 必须是 ${minimum}-${maximum} 之间的整数。`, 2);
+  }
+  return value;
+}
+
+function readEnum(value, name, allowed, fallback) {
+  if (value === undefined && fallback !== undefined) return fallback;
+  if (typeof value !== "string" || !allowed.has(value)) {
+    fail("INVALID_INPUT", `${name} 取值无效。`, 2);
+  }
+  return value;
+}
+
+function readOptionalEnum(value, name, allowed) {
+  return value === undefined ? undefined : readEnum(value, name, allowed);
+}
+
+function readRequiredDate(value, name) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    fail("INVALID_INPUT", `${name} 必须是 yyyy-MM-dd。`, 2);
+  }
+  const date = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+    fail("INVALID_INPUT", `${name} 不是有效日期。`, 2);
+  }
+  return value;
+}
+
+function readOptionalDate(value, name) {
+  return value === undefined ? undefined : readRequiredDate(value, name);
+}
+
+function validateDateWindow(dateType, fromDateStr, toDateStr) {
+  if (dateType === "CU" && (!fromDateStr || !toDateStr)) {
+    fail("INVALID_INPUT", "dateType=CU 时必须同时提供 fromDateStr 和 toDateStr。", 2);
+  }
+  if ((fromDateStr && !toDateStr) || (!fromDateStr && toDateStr)) {
+    fail("INVALID_INPUT", "fromDateStr 和 toDateStr 必须同时提供。", 2);
+  }
+  if (fromDateStr && toDateStr && fromDateStr > toDateStr) {
+    fail("INVALID_INPUT", "fromDateStr 不能晚于 toDateStr。", 2);
+  }
+}
+
+function readEntityId(value) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (Number.isSafeInteger(value) && value >= 0) return String(value);
+  fail("INVALID_INPUT", "id 必须是非空字符串或安全整数；长 ID 请使用字符串。", 2);
+}
+
+async function requestDirectApi(request, apiKey) {
+  const apiUrl = buildApiUrl(request.path, request.query);
   const controller = new AbortController();
   const timeoutMs = readTimeoutMs();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
-    response = await fetch(mcpUrl, {
-      method: "POST",
+    response = await fetch(apiUrl, {
+      method: request.method,
       headers: {
-        "Accept": "application/json, text/event-stream",
-        "Content-Type": "application/json",
+        "Accept": "application/json",
+        ...(request.method === "POST" ? { "Content-Type": "application/json" } : {}),
         "X-API-Key": apiKey,
         "User-Agent": `${bundledContract.skill}/${bundledContract.skillVersion}`,
-        "X-SellerSpace-Contract-Hash": bundledContract.contractHash,
       },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: randomUUID(),
-        method,
-        params,
-      }),
+      ...(request.method === "POST" ? { body: JSON.stringify(request.body ?? {}) } : {}),
       signal: controller.signal,
     });
   } catch (error) {
     if (error?.name === "AbortError") {
       fail("REQUEST_TIMEOUT", `SellerSpace 请求超过 ${timeoutMs}ms。`, 1);
     }
-    fail("NETWORK_ERROR", "无法连接 SellerSpace MCP。", 1);
+    fail("NETWORK_ERROR", "无法连接 SellerSpace 数据接口。", 1);
   } finally {
     clearTimeout(timeout);
   }
 
-  const text = await response.text();
+  const responseText = await response.text();
   let payload;
   try {
-    payload = parseMcpHttpPayload(text, response.headers.get("content-type") || "");
+    payload = responseText ? JSON.parse(responseText) : {};
   } catch {
-    fail("INVALID_RESPONSE", `SellerSpace MCP 返回无效响应（HTTP ${response.status}）。`, 1);
+    fail("INVALID_RESPONSE", `SellerSpace 数据接口返回非 JSON（HTTP ${response.status}）。`, 1);
   }
-  if (!response.ok) {
+  if (!response.ok || payload?.success === false) {
+    const authenticationFailure = response.status === 401
+      || response.status === 403
+      || isAuthenticationPayload(payload);
+    const rateLimited = response.status === 429;
+    const retryAfterMs = readRetryAfterMs(response, payload);
     throw new CliFailure({
       ok: false,
       ready: false,
       error: {
-        code: response.status === 401 || response.status === 403
+        code: authenticationFailure
           ? "AUTHENTICATION_REQUIRED"
-          : "HTTP_ERROR",
-        message: readMcpErrorMessage(payload) || `HTTP ${response.status}`,
+          : rateLimited
+            ? "RATE_LIMITED"
+            : "API_ERROR",
+        message: readApiErrorMessage(payload) || `HTTP ${response.status}`,
       },
-    }, response.status === 401 || response.status === 403 ? 3 : 1);
+      ...(retryAfterMs ? { meta: { retryAfterMs } } : {}),
+    }, authenticationFailure ? 3 : 1);
   }
-  if (payload?.error) {
-    throw new CliFailure({
-      ok: false,
-      ready: false,
-      error: {
-        code: "MCP_ERROR",
-        message: readMcpErrorMessage(payload) || "SellerSpace MCP 调用失败。",
-      },
-    }, 1);
-  }
-  if (!payload || typeof payload !== "object" || !("result" in payload)) {
-    fail("INVALID_RESPONSE", "SellerSpace MCP 响应缺少 result。", 1);
-  }
-  return payload.result;
+  return payload;
 }
 
-function normalizeMcpToolResult(operation, result) {
-  const data = readMcpToolData(result);
-  const whatsNew = data.__whatsNew ?? null;
-  delete data.__whatsNew;
-  if (result?.isError) {
-    throw new CliFailure({
-      ok: false,
-      operation,
-      contractHash: bundledContract.contractHash,
-      error: {
-        code: typeof data.errorCode === "string" ? data.errorCode : "TOOL_ERROR",
-        message: typeof data.message === "string"
-          ? data.message
-          : typeof data.error === "string"
-            ? data.error
-            : "SellerSpace operation 执行失败。",
-      },
-      meta: {
-        whatsNew,
-        ...(typeof data.retryAfterMs === "number"
-          ? { retryAfterMs: data.retryAfterMs }
-          : {}),
-      },
-    }, 1);
-  }
-  return {
-    ok: true,
-    operation,
-    contractHash: bundledContract.contractHash,
-    data,
-    meta: { whatsNew },
-  };
-}
-
-function readMcpToolData(result) {
-  if (result?.structuredContent && typeof result.structuredContent === "object"
-    && !Array.isArray(result.structuredContent)) {
-    return { ...result.structuredContent };
-  }
-  if (Array.isArray(result?.content)) {
-    for (let index = result.content.length - 1; index >= 0; index -= 1) {
-      const item = result.content[index];
-      if (item?.type !== "text" || typeof item.text !== "string") continue;
-      try {
-        const parsed = JSON.parse(item.text);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          return { ...parsed };
-        }
-      } catch {
-        // 普通文本不是 JSON，继续查找。
-      }
-    }
-    return { content: result.content };
-  }
-  return {};
-}
-
-function parseMcpHttpPayload(text, contentType) {
-  if (!text.trim()) return {};
-  if (!contentType.toLowerCase().includes("text/event-stream")) {
-    return JSON.parse(text);
-  }
-  const messages = [];
-  for (const block of text.split(/\r?\n\r?\n/)) {
-    const data = block
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trim())
-      .join("\n");
-    if (!data || data === "[DONE]") continue;
-    messages.push(JSON.parse(data));
-  }
-  if (messages.length === 0) {
-    throw new Error("SSE response does not contain a data event");
-  }
-  return messages.at(-1);
-}
-
-function readMcpErrorMessage(payload) {
+function readApiErrorMessage(payload) {
   if (typeof payload?.error === "string") return payload.error;
   if (typeof payload?.error?.message === "string") return payload.error.message;
   if (typeof payload?.message === "string") return payload.message;
+  if (typeof payload?.errorCode === "string") return payload.errorCode;
   return "";
 }
 
-async function validateApiKey(apiKey) {
-  const validationUrl = normalizeHttpsUrl(
-    process.env.SELLERSPACE_API_KEY_VALIDATION_URL?.trim()
-      || DEFAULT_API_KEY_VALIDATION_URL,
-    "SELLERSPACE_API_KEY_VALIDATION_URL",
+function isAuthenticationPayload(payload) {
+  const code = String(payload?.errorCode ?? payload?.error?.code ?? "");
+  return code === "MCP.Auth.Invalid"
+    || code === "MCP_AUTH_INVALID"
+    || code === "AUTHENTICATION_REQUIRED";
+}
+
+function readRetryAfterMs(response, payload) {
+  if (Number.isFinite(payload?.retryAfterMs) && payload.retryAfterMs > 0) {
+    return Math.floor(payload.retryAfterMs);
+  }
+  const seconds = Number(response.headers.get("retry-after"));
+  return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds * 1000) : undefined;
+}
+
+function buildApiUrl(path, query = {}) {
+  const baseUrl = normalizeApiBaseUrl(
+    process.env.SELLERSPACE_API_BASE_URL?.trim()
+      || bundledContract.baseUrl
+      || DEFAULT_API_BASE_URL,
   );
-  const controller = new AbortController();
-  const timeoutMs = readTimeoutMs();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  let response;
-  try {
-    response = await fetch(validationUrl, {
-      method: "GET",
-      headers: {
-        "Accept": "application/json",
-        "X-API-Key": apiKey,
-        "User-Agent": `${bundledContract.skill}/${bundledContract.skillVersion}`,
-      },
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      fail("REQUEST_TIMEOUT", `SellerSpace Key 验证超过 ${timeoutMs}ms。`, 1);
+  const url = new URL(path, `${baseUrl}/`);
+  for (const [key, value] of Object.entries(query)) {
+    const values = Array.isArray(value) ? value : [value];
+    for (const item of values) {
+      if (item !== undefined && item !== null && item !== "") {
+        url.searchParams.append(key, String(item));
+      }
     }
-    fail("NETWORK_ERROR", "无法连接 SellerSpace Key 验证接口。", 1);
-  } finally {
-    clearTimeout(timeout);
   }
-  let payload;
-  try {
-    const text = await response.text();
-    payload = text ? JSON.parse(text) : {};
-  } catch {
-    fail("INVALID_RESPONSE", `SellerSpace Key 验证接口返回非 JSON（HTTP ${response.status}）。`, 1);
+  return url;
+}
+
+function describeRequest(request) {
+  return {
+    method: request.method,
+    path: request.path,
+    ...(request.query ? { query: request.query } : {}),
+    ...(request.body ? { body: request.body } : {}),
+  };
+}
+
+function redactCredentials(value) {
+  if (Array.isArray(value)) return value.map(redactCredentials);
+  if (!value || typeof value !== "object") return value;
+  const redacted = {};
+  for (const [key, item] of Object.entries(value)) {
+    const exactMatch = [...STORE_SENSITIVE_FIELDS]
+      .some((sensitive) => sensitive.toLowerCase() === key.toLowerCase());
+    if (exactMatch || /(?:token|password|secret|authorization)$/i.test(key)) continue;
+    redacted[key] = redactCredentials(item);
   }
-  if (!response.ok) {
-    throw new CliFailure(
-      payload && typeof payload === "object"
-        ? payload
-        : { ok: false, error: { code: "HTTP_ERROR", message: `HTTP ${response.status}` } },
-      response.status === 401 || response.status === 403 ? 3 : 1,
-    );
-  }
+  return redacted;
+}
+
+async function validateApiKey(apiKey) {
+  const payload = await requestDirectApi({ method: "GET", path: PROFILE_PATH, query: {} }, apiKey);
   const profile = payload?.data && typeof payload.data === "object"
     ? payload.data
     : payload;
@@ -902,12 +1212,18 @@ async function readStdinJson() {
   }
 }
 
-function normalizeMcpUrl(value) {
-  const url = normalizeHttpsUrl(value, "SELLERSPACE_MCP_URL");
-  if (url.pathname.endsWith("/mcp")) url.pathname += "/";
+function normalizeApiBaseUrl(value) {
+  const url = normalizeHttpsUrl(value, "SELLERSPACE_API_BASE_URL");
+  url.pathname = "/";
   url.search = "";
   url.hash = "";
-  return url.toString();
+  const isTestLocalhost = process.env.NODE_ENV === "test"
+    && process.env.SELLERSPACE_ALLOW_INSECURE_LOCALHOST === "1"
+    && (url.hostname === "127.0.0.1" || url.hostname === "localhost");
+  if (url.origin !== new URL(DEFAULT_API_BASE_URL).origin && !isTestLocalhost) {
+    fail("INVALID_BASE_URL", "SELLERSPACE_API_BASE_URL 必须是官方 SellerSpace API。", 2);
+  }
+  return url.origin;
 }
 
 function normalizeHttpsUrl(value, settingName) {
@@ -917,7 +1233,8 @@ function normalizeHttpsUrl(value, settingName) {
   } catch {
     fail("INVALID_BASE_URL", `${settingName} 不是有效 URL。`, 2);
   }
-  const insecureLocalhost = process.env.SELLERSPACE_ALLOW_INSECURE_LOCALHOST === "1"
+  const insecureLocalhost = process.env.NODE_ENV === "test"
+    && process.env.SELLERSPACE_ALLOW_INSECURE_LOCALHOST === "1"
     && (url.hostname === "127.0.0.1" || url.hostname === "localhost");
   if (url.protocol !== "https:" && !insecureLocalhost) {
     fail("INVALID_BASE_URL", `${settingName} 必须使用 HTTPS。`, 2);
