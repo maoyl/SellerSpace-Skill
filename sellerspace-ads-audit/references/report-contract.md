@@ -4,13 +4,15 @@
 
 - [Renderer](#renderer)
 - [Input](#input)
-- [Query modes](#query-modes)
+- [Actions](#actions)
+- [Coverage](#coverage)
+- [Analysis modes](#analysis-modes)
 - [Formatting](#formatting)
 - [Output](#output)
 
 ## Renderer
 
-Run the renderer only after every planned MCP call for the station has succeeded:
+Run the renderer only after every planned direct API call for the station has succeeded:
 
 ```text
 node <skill-dir>/scripts/render-ads-audit-report.mjs --output-dir <directory>
@@ -20,12 +22,12 @@ Pass one JSON object through stdin. Maximum input is 5 MiB. Never include creden
 
 ## Input
 
-Use `schemaVersion=2`. The shared top-level shape is:
+Use `schemaVersion=2`. New reports use `analysisMode=evidence-driven`; the renderer also accepts the two legacy modes for existing reports.
 
 ```json
 {
   "schemaVersion": 2,
-  "analysisMode": "campaign-drilldown | portfolio-sample",
+  "analysisMode": "evidence-driven",
   "generatedAt": "2026-08-05T12:00:00.000Z",
   "executiveSummary": "一句话总结当前风险、机会与覆盖范围。",
   "scope": {
@@ -68,39 +70,16 @@ Use `schemaVersion=2`. The shared top-level shape is:
       "currency": "USD"
     }
   ],
-  "findings": [
-    {
-      "priority": "P1 | P2 | P3",
-      "kind": "problem | opportunity | observe",
-      "dimension": "traffic | conversion | efficiency | budget | structure",
-      "campaignId": "123",
-      "entityType": "campaign",
-      "entityId": "123",
-      "entityName": "Campaign name",
-      "title": "高花费无订单",
-      "evidence": [
-        {"label": "点击", "value": 42, "format": "count"}
-      ],
-      "reasoning": "判断依据",
-      "recommendation": "建议方向",
-      "confidence": "high | medium | low"
-    }
-  ],
+  "findings": [],
   "sections": [],
   "campaignDrilldowns": [],
-  "coverage": {
-    "operations": ["get_stores", "query_store_performance", "query_ads"],
-    "entitySections": ["campaign", "adGroup", "productAds", "keywords", "targets", "searchQuery"],
-    "historyCampaignIds": ["123"],
-    "placementCampaignIds": ["123"],
-    "enabledCampaignCount": 1,
-    "fullyDrilledCampaignIds": ["123"],
-    "businessCallCount": 10
-  },
-  "assumptions": ["未提供目标 ACoS，使用站点相对基准。"],
-  "limitations": ["单个实体板块明细为按花费排序的 Top 50。"]
+  "coverage": {},
+  "assumptions": ["账户整体指标仅用于寻找相对异常，不作为达标线。"],
+  "limitations": []
 }
 ```
+
+`baseline` is retained as the schema field name for compatibility. Only `source=user-target` with a non-null `targetAcos` or `targetRoas` is a business judgment line. `campaign-summary` and `store-context` are relative account context only and cannot mark efficiency/budget green or trigger `increase-budget`.
 
 Every `sections` entry uses:
 
@@ -108,7 +87,7 @@ Every `sections` entry uses:
 {
   "key": "campaign",
   "title": "广告活动",
-  "summary": "板块结论",
+  "summary": "启用 Campaign 已完整分页；按花费降序展示。",
   "sampledCount": 3,
   "totalCount": 3,
   "columns": [
@@ -120,6 +99,8 @@ Every `sections` entry uses:
   ]
 }
 ```
+
+`sampledCount` is retained for schema compatibility and must equal `rows.length`; in evidence-driven reports it means fetched unique rows, not a fixed Top-N sample.
 
 Every `campaignDrilldowns` entry uses:
 
@@ -135,7 +116,7 @@ Every `campaignDrilldowns` entry uses:
     {"key": "cost", "label": "花费", "value": 120.5, "format": "currency", "currency": "USD"}
   ],
   "trend": [
-    {"date": "2026-08-05", "cost": 12.5, "sales": 35, "acos": 0.357}
+    {"date": "2026-08-05", "cost": 12.5, "sales": 35, "acos": 0.357, "orders": 2, "budget": 10, "budgetUtilization": 1.25, "overBudget": true}
   ],
   "placements": [
     {"name": "搜索结果顶部", "cost": 75, "sales": 210, "share": 0.6}
@@ -144,16 +125,118 @@ Every `campaignDrilldowns` entry uses:
 }
 ```
 
-`campaignDrilldowns[].sections` contains the five campaign-filtered child sections: `adGroup`, `productAds`, `keywords`, `targets`, and `searchQuery`. A finding from a child entity should include `campaignId` so the report can display it inside the correct campaign dossier.
+`campaignDrilldowns[].sections` contains the five campaign-filtered child sections: `adGroup`, `productAds`, `keywords`, `targets`, and `searchQuery`. A finding from a child entity includes `campaignId` when available.
 
-## Query modes
+## Actions
 
-- `campaign-drilldown`: use when `enabledCampaignCount` is 0 to 3. Top-level `sections` must include `campaign`; `campaignDrilldowns` must contain exactly one entry per enabled campaign; each non-empty entry must contain all five child sections. `fullyDrilledCampaignIds` must match those campaign IDs. Maximum business calls: 24.
-- `portfolio-sample`: use when `enabledCampaignCount` is greater than 3. Top-level `sections` must contain all six core entity sections. `campaignDrilldowns` and `fullyDrilledCampaignIds` must be empty. Maximum business calls: 13.
+Every new finding includes structured `action` so the renderer never classifies recommendations by parsing prose:
 
-“Fully drilled” means every enabled campaign received every planned query. A child section with `totalCount > sampledCount` remains a Top 50 sample and must be disclosed as such.
+```json
+{
+  "priority": "P3",
+  "kind": "opportunity",
+  "dimension": "structure",
+  "campaignId": "123",
+  "entityType": "searchQuery",
+  "entityId": "query-1",
+  "entityName": "wireless socks",
+  "title": "高效搜索词尚未单独投放",
+  "evidence": [
+    {"label": "订单", "value": 5, "format": "count"},
+    {"label": "ACoS", "value": 0.18, "format": "ratio"}
+  ],
+  "reasoning": "样本和效率达到机会门槛，正向投放列表为空。",
+  "reasonBullets": [
+    "近 30 天获得 5 个广告归因订单，达到观察门槛。",
+    "正向 Campaign 与广告组列表均未发现该搜索词。"
+  ],
+  "caveats": ["未提供业务目标时，只建议单独投放验证，不宣称可盈利扩量。"],
+  "recommendation": "建议提取为精准关键词单独投放。",
+  "confidence": "high",
+  "action": {
+    "type": "harvest-search-term | negative-search-term | lower-bid | pause | increase-budget | adjust-placement | review-structure | observe",
+    "label": "建议提取为精准关键词",
+    "targetLevel": "campaign | adGroup | keyword | target | productAd",
+    "coverageStatus": "not-targeted | targeted | already-negative | unknown",
+    "existingTargets": [
+      {"level": "campaign | adGroup", "id": "456", "name": "Resolved name"}
+    ]
+  }
+}
+```
 
-Require all top-level keys except optional `period.from`, `period.to`, nullable baseline values, optional finding `campaignId`/`entityId`, and optional metric currency. Reject unknown schema versions, invalid enums, missing arrays, non-finite numbers, duplicate drilldown campaign IDs, non-enabled campaign drilldowns, more than 6 overview metrics, more than 4 metrics in one campaign drilldown, more than 3 drilldowns, more than 60 trend points, more than 5 placements, or more than 50 rows in any section.
+`reasonBullets` is required for evidence-driven reports and must contain at least one concrete reason. Add further reasons only when they are distinct and supported by evidence; never pad the list to reach a fixed count. `caveats` is optional. `action.targetLevel`, `action.coverageStatus`, and `action.existingTargets` are optional. `action` itself is optional only for legacy reports. Recommendation text gives a direction and never contains a calculated bid, budget, percentage, or placement adjustment.
+
+An `increase-budget` finding additionally requires explicit user-target evidence and `dailyEvidence`:
+
+```json
+{
+  "title": "日花费 vs 预算",
+  "observedDays": 30,
+  "constrainedDays": 2,
+  "basis": "reported-over-budget | historical-budget | current-budget-reference | unavailable",
+  "points": [
+    {
+      "date": "2026-08-05",
+      "cost": 12.5,
+      "budget": 10,
+      "orders": 2,
+      "acos": 0.24,
+      "overBudget": true
+    }
+  ]
+}
+```
+
+For every `dailyEvidence`, `observedDays` must equal `points.length`, and `constrainedDays` must equal the number of points with `overBudget=true`. For `increase-budget`, `basis` must be `reported-over-budget` or `historical-budget`, `constrainedDays` must be at least two, and `points` must be non-empty. A current budget comparison may be displayed as context but cannot create an expansion recommendation.
+
+## Coverage
+
+New evidence-driven reports use:
+
+```json
+{
+  "operations": ["get_stores", "query_store_performance", "query_ads"],
+  "entitySections": ["campaign", "adGroup", "productAds", "keywords", "targets", "searchQuery"],
+  "historyCampaignIds": ["123"],
+  "placementCampaignIds": ["123"],
+  "enabledCampaignCount": 26,
+  "fullyDrilledCampaignIds": ["123"],
+  "businessCallCount": 37,
+  "entities": [
+    {
+      "key": "campaign",
+      "queriedCount": 26,
+      "totalCount": 26,
+      "spendCoverage": 1,
+      "status": "complete | target-reached | unknown"
+    }
+  ],
+  "selectedCampaigns": [
+    {
+      "campaignId": "123",
+      "campaignName": "Example Campaign",
+      "reasons": ["P1 高花费无订单"],
+      "historyQueried": true,
+      "placementQueried": true
+    }
+  ]
+}
+```
+
+- `spendCoverage` uses ratio scale and may be `null` only when `status=unknown`.
+- `campaign` must be `complete` and include every enabled Campaign.
+- Each child entity is `target-reached` at 90% or greater, `complete` when all pages were fetched, or `unknown` when positive summary cost is unavailable.
+- For every core entity, the matching top-level section must satisfy `rows.length = sampledCount = coverage.queriedCount` and `section.totalCount = coverage.totalCount`. A mismatch is `INCOMPLETE_REPORT_INPUT`; do not render a contradictory report.
+- `businessCallCount` is informational and has no maximum.
+
+## Analysis modes
+
+- `evidence-driven`: top-level `sections` contains all six core entity sections. `campaignDrilldowns`, `fullyDrilledCampaignIds`, and `selectedCampaigns` describe the same evidence-selected Campaign set. DAILY history is required for every selected Campaign. Placement IDs are a subset of selected SP Campaigns where placement evidence was relevant.
+- `campaign-drilldown`: accepted for legacy reports. Top-level `sections` contains `campaign`; drilldowns may contain any number of enabled Campaigns. No old three-Campaign or 24-call cap is enforced.
+- `portfolio-sample`: accepted for legacy reports. Top-level `sections` contains all six core sections. No old Campaign-count threshold or 13-call cap is enforced.
+
+Require all top-level keys except optional `period.from`, `period.to`, nullable target/account values, optional finding IDs, and optional legacy finding/coverage extensions. Reject unknown schema versions, invalid enums, missing arrays, non-finite numbers, duplicate section keys, duplicate drilldown IDs, non-enabled drilldowns, mismatched evidence-driven selection IDs, inconsistent section/coverage counts, or invalid coverage ratios. Do not impose a business-call, Campaign, trend, placement, metric, or section-row count limit.
 
 ## Formatting
 
@@ -165,7 +248,14 @@ Require all top-level keys except optional `period.from`, `period.to`, nullable 
 - `string`: escape and display text.
 - `null` or missing display values: show `—`.
 
-Treat every string as untrusted and HTML-escape it. Do not create links from returned business text. The renderer embeds the SellerSpace logo and generated data charts as local data URIs; it must not load any remote dependency.
+Treat every string as untrusted and HTML-escape it. Do not create links from returned business text. The renderer embeds the SellerSpace logo, report data, critical fallback styles, and interaction code. It loads only Tailwind Browser `https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4` and ECharts `https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js`. If either CDN is unavailable, the recommendation text, reason bullets, evidence metrics, coverage, and raw tables remain readable; charts show a text fallback. This is a single-file online-enhanced report, not a fully offline report.
+
+The report uses two independent accessible tab groups:
+
+- Action rail grouped as 立即止损、扩量机会、结构整理. Every action panel leads with the direction and then lists “给出这个建议的原因”, metrics, daily/placement support when available, and risks/caveats.
+- Bottom tabs: 账户概览、Campaign、广告组、推广商品、关键词、商品投放、搜索词、查询完整性.
+
+Each data table sorts by `cost` descending when that column exists and shows 25 rows per client-side page without dropping embedded rows. Tabs support click, Left/Right, Up/Down on the vertical action rail, Home/End, focus state, ARIA relationships, responsive horizontal scrolling, and print expansion of all panels.
 
 ## Output
 

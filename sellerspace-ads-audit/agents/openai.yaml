@@ -1,6 +1,6 @@
 interface:
   display_name: "优麦云-亚马逊广告体检"
-  short_description: "只读检查启用中的亚马逊广告，小规模活动逐一深挖并生成离线报告"
-  default_prompt: "使用 $sellerspace-ads-audit 检查指定 SellerSpace 亚马逊站点启用中的广告；活动较少时逐一向下钻取并生成只读诊断报告。"
+  short_description: "只读检查启用中的广告，以90%花费覆盖和证据下钻生成行动报告"
+  default_prompt: "使用 $sellerspace-ads-audit 直连 SellerSpace 实际只读接口，检查指定站点启用中的广告，以 90% 花费覆盖和证据驱动下钻生成可执行的诊断报告。"
 policy:
   allow_implicit_invocation: true
