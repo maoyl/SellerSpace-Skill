@@ -7,10 +7,7 @@ import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 
 const MAX_INPUT_BYTES = 5 * 1024 * 1024;
-const MAX_SECTION_ROWS = 50;
-const MAX_DRILLDOWNS = 3;
-const MAX_TREND_POINTS = 60;
-const MAX_PLACEMENTS = 5;
+const TABLE_PAGE_SIZE = 25;
 const CORE_SECTION_KEYS = [
   "campaign",
   "adGroup",
@@ -20,6 +17,14 @@ const CORE_SECTION_KEYS = [
   "searchQuery",
 ];
 const CHILD_SECTION_KEYS = CORE_SECTION_KEYS.slice(1);
+const ACTION_TYPES = [
+  "harvest-search-term",
+  "negative-search-term",
+  "lower-bid",
+  "pause",
+  "increase-budget",
+  "observe",
+];
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const logoPath = resolve(scriptDir, "..", "assets", "sellerspace-logo.png");
 
@@ -83,7 +88,11 @@ function validateReport(report) {
   if (report.schemaVersion !== 2) {
     throw new ReportError("UNSUPPORTED_REPORT_SCHEMA", "仅支持 schemaVersion=2。");
   }
-  requireEnum(report.analysisMode, ["campaign-drilldown", "portfolio-sample"], "analysisMode");
+  requireEnum(
+    report.analysisMode,
+    ["evidence-driven", "campaign-drilldown", "portfolio-sample"],
+    "analysisMode",
+  );
   requireDate(report.generatedAt, "generatedAt");
   requireString(report.executiveSummary, "executiveSummary");
 
@@ -137,42 +146,22 @@ function validateReport(report) {
   }
 
   requireArray(report.overview, "overview");
-  if (report.overview.length > 6) {
-    throw new ReportError("REPORT_SECTION_TOO_LARGE", "overview 不能超过 6 个指标。");
-  }
-  for (const [index, metric] of report.overview.entries()) {
-    validateMetric(metric, `overview[${index}]`);
-  }
+  report.overview.forEach((metric, index) => validateMetric(metric, `overview[${index}]`));
 
   requireArray(report.findings, "findings");
-  for (const [index, finding] of report.findings.entries()) {
-    validateFinding(finding, `findings[${index}]`);
-  }
+  report.findings.forEach((finding, index) => validateFinding(finding, `findings[${index}]`));
 
   requireArray(report.sections, "sections");
-  for (const [index, section] of report.sections.entries()) {
-    validateSection(section, `sections[${index}]`);
-  }
+  report.sections.forEach((section, index) => validateSection(section, `sections[${index}]`));
 
   requireArray(report.campaignDrilldowns, "campaignDrilldowns");
-  if (report.campaignDrilldowns.length > MAX_DRILLDOWNS) {
-    throw new ReportError("REPORT_SECTION_TOO_LARGE", "campaignDrilldowns 不能超过 3 个活动。");
-  }
-  for (const [index, drilldown] of report.campaignDrilldowns.entries()) {
-    validateCampaignDrilldown(drilldown, `campaignDrilldowns[${index}]`);
-  }
+  report.campaignDrilldowns.forEach((item, index) => {
+    validateCampaignDrilldown(item, `campaignDrilldowns[${index}]`);
+  });
 
-  requireObject(report.coverage, "coverage");
-  requireStringArray(report.coverage.operations, "coverage.operations");
-  requireStringArray(report.coverage.entitySections, "coverage.entitySections");
-  requireScalarArray(report.coverage.historyCampaignIds, "coverage.historyCampaignIds");
-  requireScalarArray(report.coverage.placementCampaignIds, "coverage.placementCampaignIds");
-  requireNonNegativeInteger(report.coverage.enabledCampaignCount, "coverage.enabledCampaignCount");
-  requireScalarArray(report.coverage.fullyDrilledCampaignIds, "coverage.fullyDrilledCampaignIds");
-  requireNonNegativeInteger(report.coverage.businessCallCount, "coverage.businessCallCount");
+  validateCoverage(report.coverage);
   requireStringArray(report.assumptions, "assumptions");
   requireStringArray(report.limitations, "limitations");
-
   validateModeConsistency(report);
 }
 
@@ -185,18 +174,47 @@ function validateFinding(finding, path) {
     ["traffic", "conversion", "efficiency", "budget", "structure"],
     `${path}.dimension`,
   );
-  optionalString(finding.campaignId, `${path}.campaignId`);
+  optionalScalar(finding.campaignId, `${path}.campaignId`);
   requireString(finding.entityType, `${path}.entityType`);
-  optionalString(finding.entityId, `${path}.entityId`);
+  optionalScalar(finding.entityId, `${path}.entityId`);
   requireString(finding.entityName, `${path}.entityName`);
   requireString(finding.title, `${path}.title`);
   requireArray(finding.evidence, `${path}.evidence`);
-  for (const [metricIndex, metric] of finding.evidence.entries()) {
-    validateMetric(metric, `${path}.evidence[${metricIndex}]`, false);
-  }
+  finding.evidence.forEach((metric, index) => {
+    validateMetric(metric, `${path}.evidence[${index}]`, false);
+  });
   requireString(finding.reasoning, `${path}.reasoning`);
   requireString(finding.recommendation, `${path}.recommendation`);
   requireEnum(finding.confidence, ["high", "medium", "low"], `${path}.confidence`);
+  if (finding.action !== undefined && finding.action !== null) {
+    validateAction(finding.action, `${path}.action`);
+  }
+}
+
+function validateAction(action, path) {
+  requireObject(action, path);
+  requireEnum(action.type, ACTION_TYPES, `${path}.type`);
+  requireString(action.label, `${path}.label`);
+  optionalEnum(
+    action.targetLevel,
+    ["campaign", "adGroup", "keyword", "target", "productAd"],
+    `${path}.targetLevel`,
+  );
+  optionalEnum(
+    action.coverageStatus,
+    ["not-targeted", "targeted", "already-negative", "unknown"],
+    `${path}.coverageStatus`,
+  );
+  if (action.existingTargets !== undefined) {
+    requireArray(action.existingTargets, `${path}.existingTargets`);
+    action.existingTargets.forEach((target, index) => {
+      const targetPath = `${path}.existingTargets[${index}]`;
+      requireObject(target, targetPath);
+      requireEnum(target.level, ["campaign", "adGroup"], `${targetPath}.level`);
+      requireScalar(target.id, `${targetPath}.id`);
+      requireString(target.name, `${targetPath}.name`);
+    });
+  }
 }
 
 function validateSection(section, path) {
@@ -210,8 +228,8 @@ function validateSection(section, path) {
     throw new ReportError("INVALID_REPORT_INPUT", `${path}.sampledCount 不能大于 totalCount。`);
   }
   requireArray(section.columns, `${path}.columns`);
-  for (const [columnIndex, column] of section.columns.entries()) {
-    const columnPath = `${path}.columns[${columnIndex}]`;
+  section.columns.forEach((column, index) => {
+    const columnPath = `${path}.columns[${index}]`;
     requireObject(column, columnPath);
     requireString(column.key, `${columnPath}.key`);
     requireString(column.label, `${columnPath}.label`);
@@ -221,17 +239,12 @@ function validateSection(section, path) {
       `${columnPath}.format`,
     );
     optionalString(column.currency, `${columnPath}.currency`);
-  }
+  });
   requireArray(section.rows, `${path}.rows`);
-  if (section.rows.length > MAX_SECTION_ROWS) {
-    throw new ReportError("REPORT_SECTION_TOO_LARGE", `${path}.rows 不能超过 50 行。`);
-  }
   if (section.rows.length !== section.sampledCount) {
     throw new ReportError("INVALID_REPORT_INPUT", `${path}.sampledCount 必须等于 rows 行数。`);
   }
-  for (const [rowIndex, row] of section.rows.entries()) {
-    requireObject(row, `${path}.rows[${rowIndex}]`);
-  }
+  section.rows.forEach((row, index) => requireObject(row, `${path}.rows[${index}]`));
 }
 
 function validateCampaignDrilldown(drilldown, path) {
@@ -247,97 +260,151 @@ function validateCampaignDrilldown(drilldown, path) {
   );
   requireString(drilldown.summary, `${path}.summary`);
   requireArray(drilldown.metrics, `${path}.metrics`);
-  if (drilldown.metrics.length > 4) {
-    throw new ReportError("REPORT_SECTION_TOO_LARGE", `${path}.metrics 不能超过 4 个指标。`);
-  }
-  for (const [index, metric] of drilldown.metrics.entries()) {
+  drilldown.metrics.forEach((metric, index) => {
     validateMetric(metric, `${path}.metrics[${index}]`);
-  }
+  });
   requireArray(drilldown.trend, `${path}.trend`);
-  if (drilldown.trend.length > MAX_TREND_POINTS) {
-    throw new ReportError("REPORT_SECTION_TOO_LARGE", `${path}.trend 不能超过 60 个点。`);
-  }
-  for (const [index, point] of drilldown.trend.entries()) {
+  drilldown.trend.forEach((point, index) => {
     const pointPath = `${path}.trend[${index}]`;
     requireObject(point, pointPath);
     requireString(point.date, `${pointPath}.date`);
     requireNullableFiniteNumber(point.cost, `${pointPath}.cost`);
     requireNullableFiniteNumber(point.sales, `${pointPath}.sales`);
     requireNullableFiniteNumber(point.acos, `${pointPath}.acos`);
-  }
+  });
   requireArray(drilldown.placements, `${path}.placements`);
-  if (drilldown.placements.length > MAX_PLACEMENTS) {
-    throw new ReportError("REPORT_SECTION_TOO_LARGE", `${path}.placements 不能超过 5 个广告位。`);
-  }
-  for (const [index, placement] of drilldown.placements.entries()) {
+  drilldown.placements.forEach((placement, index) => {
     const placementPath = `${path}.placements[${index}]`;
     requireObject(placement, placementPath);
     requireString(placement.name, `${placementPath}.name`);
     requireNullableFiniteNumber(placement.cost, `${placementPath}.cost`);
     requireNullableFiniteNumber(placement.sales, `${placementPath}.sales`);
     requireNullableFiniteNumber(placement.share, `${placementPath}.share`);
-  }
+  });
   requireArray(drilldown.sections, `${path}.sections`);
-  for (const [index, section] of drilldown.sections.entries()) {
+  drilldown.sections.forEach((section, index) => {
     validateSection(section, `${path}.sections[${index}]`);
-  }
+  });
   requireExactSectionKeys(drilldown.sections, CHILD_SECTION_KEYS, `${path}.sections`);
 }
 
+function validateCoverage(coverage) {
+  requireObject(coverage, "coverage");
+  requireStringArray(coverage.operations, "coverage.operations");
+  requireStringArray(coverage.entitySections, "coverage.entitySections");
+  requireScalarArray(coverage.historyCampaignIds, "coverage.historyCampaignIds");
+  requireScalarArray(coverage.placementCampaignIds, "coverage.placementCampaignIds");
+  requireNonNegativeInteger(coverage.enabledCampaignCount, "coverage.enabledCampaignCount");
+  requireScalarArray(coverage.fullyDrilledCampaignIds, "coverage.fullyDrilledCampaignIds");
+  requireNonNegativeInteger(coverage.businessCallCount, "coverage.businessCallCount");
+
+  if (coverage.entities !== undefined) {
+    requireArray(coverage.entities, "coverage.entities");
+    coverage.entities.forEach((entity, index) => {
+      const path = `coverage.entities[${index}]`;
+      requireObject(entity, path);
+      requireEnum(entity.key, CORE_SECTION_KEYS, `${path}.key`);
+      requireNonNegativeInteger(entity.queriedCount, `${path}.queriedCount`);
+      requireNonNegativeInteger(entity.totalCount, `${path}.totalCount`);
+      if (entity.queriedCount > entity.totalCount) {
+        throw new ReportError("INVALID_REPORT_INPUT", `${path}.queriedCount 不能大于 totalCount。`);
+      }
+      requireEnum(entity.status, ["complete", "target-reached", "unknown"], `${path}.status`);
+      requireNullableFiniteNumber(entity.spendCoverage, `${path}.spendCoverage`);
+      if (entity.status === "unknown" && entity.spendCoverage !== null) {
+        throw new ReportError("INVALID_REPORT_INPUT", `${path}.unknown 必须使用 null spendCoverage。`);
+      }
+      if (entity.status !== "unknown") {
+        requireRatio(entity.spendCoverage, `${path}.spendCoverage`);
+      }
+      if (entity.status === "target-reached" && entity.spendCoverage < 0.9) {
+        throw new ReportError("INVALID_REPORT_INPUT", `${path}.target-reached 覆盖率不能低于 90%。`);
+      }
+    });
+  }
+
+  if (coverage.selectedCampaigns !== undefined) {
+    requireArray(coverage.selectedCampaigns, "coverage.selectedCampaigns");
+    coverage.selectedCampaigns.forEach((campaign, index) => {
+      const path = `coverage.selectedCampaigns[${index}]`;
+      requireObject(campaign, path);
+      requireScalar(campaign.campaignId, `${path}.campaignId`);
+      requireString(campaign.campaignName, `${path}.campaignName`);
+      requireStringArray(campaign.reasons, `${path}.reasons`);
+      if (campaign.reasons.length === 0) {
+        throw new ReportError("INVALID_REPORT_INPUT", `${path}.reasons 不能为空。`);
+      }
+      requireBoolean(campaign.historyQueried, `${path}.historyQueried`);
+      requireBoolean(campaign.placementQueried, `${path}.placementQueried`);
+    });
+  }
+}
+
 function validateModeConsistency(report) {
-  const enabledCount = report.coverage.enabledCampaignCount;
   const topLevelKeys = report.sections.map((section) => section.key);
+  if (new Set(topLevelKeys).size !== topLevelKeys.length) {
+    throw new ReportError("INVALID_REPORT_INPUT", "sections 包含重复 key。");
+  }
   const drilldownIds = report.campaignDrilldowns.map((item) => String(item.campaignId));
-  const uniqueDrilldownIds = new Set(drilldownIds);
-  if (uniqueDrilldownIds.size !== drilldownIds.length) {
+  if (new Set(drilldownIds).size !== drilldownIds.length) {
     throw new ReportError("INVALID_REPORT_INPUT", "campaignDrilldowns 包含重复 campaignId。");
   }
 
   if (report.analysisMode === "campaign-drilldown") {
-    if (enabledCount > MAX_DRILLDOWNS) {
-      throw new ReportError("INVALID_REPORT_INPUT", "campaign-drilldown 仅适用于 0 到 3 个启用活动。");
-    }
     requireExactSectionKeys(report.sections, ["campaign"], "sections");
-    if (report.campaignDrilldowns.length !== enabledCount) {
-      throw new ReportError("INCOMPLETE_REPORT_INPUT", "每个启用活动都必须有一个 campaignDrilldowns 条目。");
+    if (report.campaignDrilldowns.length !== report.coverage.enabledCampaignCount) {
+      throw new ReportError("INCOMPLETE_REPORT_INPUT", "legacy 逐活动报告必须覆盖每个启用 Campaign。");
     }
-    requireSameIdSet(
-      report.coverage.fullyDrilledCampaignIds,
-      drilldownIds,
-      "fullyDrilledCampaignIds 必须与逐活动下钻范围一致。",
-    );
-    requireSameIdSet(
-      report.coverage.historyCampaignIds,
-      drilldownIds,
-      "campaign-drilldown 必须查询每个启用活动的历史趋势。",
-    );
-    const spCampaignIds = report.campaignDrilldowns
+    requireSameIdSet(report.coverage.fullyDrilledCampaignIds, drilldownIds, "完整下钻范围不一致。");
+    requireSameIdSet(report.coverage.historyCampaignIds, drilldownIds, "趋势范围不一致。");
+    const spIds = report.campaignDrilldowns
       .filter((item) => item.adType.toUpperCase() === "SP")
       .map((item) => String(item.campaignId));
-    requireSameIdSet(
-      report.coverage.placementCampaignIds,
-      spCampaignIds,
-      "campaign-drilldown 必须查询每个 SP 活动的广告位数据。",
-    );
-    if (report.coverage.businessCallCount > 24) {
-      throw new ReportError("INVALID_REPORT_INPUT", "campaign-drilldown 业务调用不能超过 24 次。");
-    }
-  } else {
-    if (enabledCount <= MAX_DRILLDOWNS) {
-      throw new ReportError("INVALID_REPORT_INPUT", "portfolio-sample 仅适用于超过 3 个启用活动。");
-    }
-    requireExactSectionKeys(report.sections, CORE_SECTION_KEYS, "sections");
-    if (report.campaignDrilldowns.length !== 0
-      || report.coverage.fullyDrilledCampaignIds.length !== 0) {
-      throw new ReportError("INVALID_REPORT_INPUT", "portfolio-sample 不得声明逐活动完整下钻。");
-    }
-    if (report.coverage.businessCallCount > 13) {
-      throw new ReportError("INVALID_REPORT_INPUT", "portfolio-sample 业务调用不能超过 13 次。");
-    }
+    requireSameIdSet(report.coverage.placementCampaignIds, spIds, "SP 广告位范围不一致。");
+    return;
   }
 
-  if (new Set(topLevelKeys).size !== topLevelKeys.length) {
-    throw new ReportError("INVALID_REPORT_INPUT", "sections 包含重复 key。");
+  requireExactSectionKeys(report.sections, CORE_SECTION_KEYS, "sections");
+  if (report.analysisMode === "portfolio-sample") {
+    if (report.campaignDrilldowns.length !== 0 || report.coverage.fullyDrilledCampaignIds.length !== 0) {
+      throw new ReportError("INVALID_REPORT_INPUT", "legacy 组合报告不得声明逐活动完整下钻。");
+    }
+    return;
+  }
+
+  if (!Array.isArray(report.coverage.entities)) {
+    throw new ReportError("INCOMPLETE_REPORT_INPUT", "evidence-driven 必须提供实体覆盖明细。");
+  }
+  requireExactCoverageKeys(report.coverage.entities);
+  const campaignCoverage = report.coverage.entities.find((item) => item.key === "campaign");
+  if (campaignCoverage.status !== "complete"
+    || campaignCoverage.queriedCount !== report.coverage.enabledCampaignCount
+    || campaignCoverage.totalCount !== report.coverage.enabledCampaignCount) {
+    throw new ReportError("INCOMPLETE_REPORT_INPUT", "启用 Campaign 必须完整分页覆盖。");
+  }
+  if (!Array.isArray(report.coverage.selectedCampaigns)) {
+    throw new ReportError("INCOMPLETE_REPORT_INPUT", "evidence-driven 必须提供下钻选择原因。");
+  }
+  const selectedIds = report.coverage.selectedCampaigns.map((item) => String(item.campaignId));
+  if (new Set(selectedIds).size !== selectedIds.length) {
+    throw new ReportError("INVALID_REPORT_INPUT", "selectedCampaigns 包含重复 campaignId。");
+  }
+  requireSameIdSet(selectedIds, drilldownIds, "下钻 Campaign 与选择范围不一致。");
+  requireSameIdSet(report.coverage.fullyDrilledCampaignIds, drilldownIds, "完整下钻范围不一致。");
+  requireSameIdSet(report.coverage.historyCampaignIds, drilldownIds, "每个证据命中 Campaign 都必须查询趋势。");
+  const placementSet = new Set(report.coverage.placementCampaignIds.map(String));
+  const selectedSet = new Set(selectedIds);
+  if ([...placementSet].some((id) => !selectedSet.has(id))) {
+    throw new ReportError("INVALID_REPORT_INPUT", "广告位查询只能属于证据命中的 Campaign。");
+  }
+  for (const campaign of report.coverage.selectedCampaigns) {
+    const id = String(campaign.campaignId);
+    if (!campaign.historyQueried) {
+      throw new ReportError("INCOMPLETE_REPORT_INPUT", "证据命中的 Campaign 必须完成趋势查询。");
+    }
+    if (campaign.placementQueried !== placementSet.has(id)) {
+      throw new ReportError("INVALID_REPORT_INPUT", "placementQueried 与广告位覆盖 ID 不一致。");
+    }
   }
 }
 
@@ -346,10 +413,16 @@ function requireExactSectionKeys(sections, expected, path) {
   if (new Set(actual).size !== actual.length
     || actual.length !== expected.length
     || expected.some((key) => !actual.includes(key))) {
-    throw new ReportError(
-      "INCOMPLETE_REPORT_INPUT",
-      `${path} 必须恰好包含：${expected.join("、")}。`,
-    );
+    throw new ReportError("INCOMPLETE_REPORT_INPUT", `${path} 必须恰好包含：${expected.join("、")}。`);
+  }
+}
+
+function requireExactCoverageKeys(entities) {
+  const actual = entities.map((entity) => entity.key);
+  if (new Set(actual).size !== CORE_SECTION_KEYS.length
+    || actual.length !== CORE_SECTION_KEYS.length
+    || CORE_SECTION_KEYS.some((key) => !actual.includes(key))) {
+    throw new ReportError("INCOMPLETE_REPORT_INPUT", "coverage.entities 必须包含六类核心实体。");
   }
 }
 
@@ -411,6 +484,13 @@ function requireNullableFiniteNumber(value, path) {
   if (value !== null) requireFiniteNumber(value, path);
 }
 
+function requireRatio(value, path) {
+  requireFiniteNumber(value, path);
+  if (value < 0 || value > 1) {
+    throw new ReportError("INVALID_REPORT_INPUT", `${path} 必须是 0 到 1 的比例。`);
+  }
+}
+
 function requireNonNegativeInteger(value, path) {
   requireFiniteNumber(value, path);
   if (!Number.isInteger(value) || value < 0) {
@@ -419,9 +499,19 @@ function requireNonNegativeInteger(value, path) {
 }
 
 function requireScalar(value, path) {
-  if (!['string', 'number'].includes(typeof value)
+  if (!["string", "number"].includes(typeof value)
     || (typeof value === "number" && !Number.isFinite(value))) {
     throw new ReportError("INVALID_REPORT_INPUT", `${path} 必须是字符串或有限数字。`);
+  }
+}
+
+function optionalScalar(value, path) {
+  if (value !== undefined && value !== null) requireScalar(value, path);
+}
+
+function requireBoolean(value, path) {
+  if (typeof value !== "boolean") {
+    throw new ReportError("INVALID_REPORT_INPUT", `${path} 必须是布尔值。`);
   }
 }
 
@@ -437,11 +527,12 @@ function requireScalarArray(value, path) {
 
 function requireEnum(value, allowed, path) {
   if (!allowed.includes(value)) {
-    throw new ReportError(
-      "INVALID_REPORT_INPUT",
-      `${path} 必须是：${allowed.join("、")}。`,
-    );
+    throw new ReportError("INVALID_REPORT_INPUT", `${path} 必须是：${allowed.join("、")}。`);
   }
+}
+
+function optionalEnum(value, allowed, path) {
+  if (value !== undefined && value !== null) requireEnum(value, allowed, path);
 }
 
 function requireDate(value, path) {
@@ -453,35 +544,34 @@ function requireDate(value, path) {
 
 function renderReport(report, logo) {
   const title = `${report.scope.marketplace} 亚马逊广告体检报告`;
-  const campaignSection = report.sections.find((section) => section.key === "campaign");
-  const problems = report.findings.filter((finding) => finding.kind !== "opportunity");
-  const opportunities = report.findings.filter((finding) => finding.kind === "opportunity");
-  const portfolioSections = report.analysisMode === "portfolio-sample"
-    ? report.sections.filter((section) => section.key !== "campaign")
-    : [];
+  const actionGroups = groupFindings(report.findings);
+  const orderedSections = CORE_SECTION_KEYS
+    .map((key) => report.sections.find((section) => section.key === key))
+    .filter(Boolean);
 
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
   <title>${escapeHtml(title)}</title>
   <style>
-    :root{--ink:#172038;--ink-soft:#35405c;--muted:#72798b;--line:#e5e7ee;--line-strong:#d7dbea;--paper:#fff;--canvas:#f7f7fa;--violet:#6257d9;--violet-soft:#f0effc;--teal:#0f9f95;--teal-soft:#e9f8f6;--red:#d65059;--red-soft:#fdf0f1;--amber:#bf7b20;--amber-soft:#fff6e8;--green:#25866f;--green-soft:#edf8f3;--gray:#8790a4;--gray-soft:#f1f3f6}
-    *{box-sizing:border-box}html{background:var(--canvas)}body{margin:0;color:var(--ink);font:14px/1.58 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}button,summary{font:inherit}summary:focus-visible{outline:2px solid var(--violet);outline-offset:2px}
-    main{max-width:1440px;margin:0 auto;padding:12px 14px 36px}.sheet{background:var(--paper);border:1px solid var(--line);box-shadow:0 10px 30px rgba(28,34,56,.05)}
-    .masthead{min-height:70px;padding:12px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:20px}.brand{display:flex;align-items:center;gap:22px;min-width:0}.brand img{width:182px;max-height:48px;object-fit:contain;object-position:left center}.report-heading{padding-left:22px;border-left:1px solid var(--line);min-width:0}.report-heading h1{margin:0;font-size:24px;line-height:1.18;letter-spacing:-.02em}.meta{margin-top:5px;display:flex;flex-wrap:wrap;gap:3px 15px;color:var(--muted);font-size:11px}.scope-pill{border:1px solid #d7d4f4;background:var(--violet-soft);color:#4940a5;padding:7px 11px;border-radius:7px;font-weight:700;white-space:nowrap}
-    .intro{padding:15px 24px 0}.lede{max-width:none;margin:0;color:var(--ink-soft);font-size:13px}.lede strong{color:var(--ink);margin-right:6px}.health-line{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));margin-top:13px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.health-item{padding:8px 12px;border-right:1px solid var(--line);min-width:0}.health-item:last-child{border-right:0}.health-label{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11px}.status-dot{width:8px;height:8px;border-radius:50%;background:var(--gray);flex:0 0 auto}.status-red .status-dot{background:var(--red)}.status-yellow .status-dot{background:var(--amber)}.status-green .status-dot{background:var(--green)}.health-item strong{display:inline-block;margin:3px 8px 0 0;font-size:14px}.health-item p{display:inline;margin:0;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .number-band{display:grid;grid-template-columns:130px repeat(auto-fit,minmax(130px,1fr));margin:15px 24px 0;background:#f6f5fd;border:1px solid #ebe9fa;border-radius:6px}.band-label{display:flex;align-items:center;padding:11px 15px;font-size:16px;font-weight:800;border-right:1px solid #e2dff5}.number-cell{padding:9px 14px;text-align:center;border-right:1px solid #e2dff5}.number-cell:last-child{border-right:0}.number-cell span{display:block;color:var(--ink-soft);font-size:10px}.number-cell strong{display:block;margin-top:1px;color:var(--violet);font-size:18px;letter-spacing:-.01em}
-    .editorial{display:grid;grid-template-columns:minmax(0,2.15fr) minmax(280px,1fr);gap:30px;padding:20px 24px 22px}.section-title{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:8px}.section-title h2{margin:0;font-size:18px;letter-spacing:-.01em}.section-title p{margin:0;color:var(--muted);font-size:10px}.decision-list{border-top:1px solid var(--line-strong)}.decision-row{display:grid;grid-template-columns:48px minmax(0,1fr);gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}.priority{font-size:12px;font-weight:900;color:var(--violet);letter-spacing:.06em}.priority-p1{color:var(--red)}.priority-p2{color:var(--amber)}.decision-row h3{margin:0;font-size:14px}.entity{margin:1px 0 5px;color:var(--muted);font-size:10px}.evidence{display:flex;flex-wrap:wrap;gap:3px 10px;color:var(--ink-soft);font-size:10px}.evidence span{border-bottom:1px solid var(--line-strong)}.decision-copy{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-top:5px}.decision-copy p{margin:0;color:var(--muted);font-size:10px;line-height:1.45}.decision-copy strong{color:var(--ink-soft)}
-    .aside-section{padding-bottom:12px;margin-bottom:12px;border-bottom:1px solid var(--line)}.aside-section:last-child{border-bottom:0;margin-bottom:0}.aside-section h2{margin:0 0 7px;font-size:14px}.aside-section h3{margin:8px 0 3px;font-size:11px}.opportunity{padding:6px 0;border-top:1px solid var(--line)}.opportunity:first-of-type{border-top:0;padding-top:0}.opportunity strong{display:block;font-size:11px}.opportunity p{margin:2px 0 0;color:var(--muted);font-size:10px}.coverage-list{display:grid;grid-template-columns:1fr auto 1fr auto;gap:3px 10px;margin:0;font-size:10px}.coverage-list dt{color:var(--muted)}.coverage-list dd{margin:0;font-weight:700;text-align:right}.note-list{margin:0;padding-left:15px;color:var(--muted);font-size:10px}.note-list li+li{margin-top:2px}.empty{color:var(--muted);margin:8px 0}
-    .panorama{padding:10px 24px 14px;border-top:1px solid var(--line)}.panorama>.section-title{margin-bottom:4px}.mode-note{color:var(--teal);font-weight:700}.table-wrap{overflow-x:auto;border-top:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong)}table{width:100%;border-collapse:collapse;min-width:680px}th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top;font-size:10px}th{color:var(--muted);font-size:9px;font-weight:700;letter-spacing:.03em;background:#fafafd}tbody tr:last-child td{border-bottom:0}
-    .dossiers{border-top:1px solid var(--line-strong)}.campaign-table-head{display:grid;grid-template-columns:32px minmax(180px,1.4fr) repeat(4,minmax(72px,.6fr)) minmax(150px,1.1fr) 34px;gap:9px;padding:5px 2px;color:var(--muted);font-size:9px;background:#fafafd;border-bottom:1px solid var(--line)}.dossier{border-bottom:1px solid var(--line-strong)}.dossier>summary{cursor:pointer;list-style:none;display:grid;grid-template-columns:32px minmax(180px,1.4fr) repeat(4,minmax(72px,.6fr)) minmax(150px,1.1fr) 34px;gap:9px;align-items:center;padding:5px 2px}.dossier>summary::-webkit-details-marker{display:none}.campaign-index{font:700 11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}.campaign-title small{display:block;color:var(--muted);font-size:8px;letter-spacing:.04em}.campaign-title strong{display:block;margin-top:1px;font-size:10px}.row-metric small{display:none}.row-metric strong{font-size:9px}.campaign-summary{color:var(--muted);font-size:8px;line-height:1.3}.disclosure{color:var(--violet);font-size:9px;font-weight:700}.disclosure::after{content:"展开"}.dossier[open] .disclosure::after{content:"收起"}.dossier-body{padding:5px 7px 7px 41px;background:#fbfbfe}.evidence-grid{display:grid;grid-template-columns:minmax(150px,.85fr) minmax(260px,1.6fr) minmax(200px,1.05fr) minmax(190px,1.05fr);gap:8px}.evidence-panel{min-width:0;padding-right:7px;border-right:1px solid var(--line)}.evidence-panel:last-child{padding-right:0;border-right:0}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:7px;margin-bottom:2px}.panel-head h3{margin:0;font-size:9px}.legend{display:flex;gap:7px;color:var(--muted);font-size:7px}.legend span{display:flex;align-items:center;gap:3px}.legend i{width:8px;height:2px;background:var(--violet)}.legend span+span i{background:var(--teal)}.trend-image{display:block;width:100%;height:78px;object-fit:contain}.placement-layout{display:grid;grid-template-columns:62px 1fr;align-items:center;gap:5px}.placement-image{display:block;width:60px;height:60px}.placement-list{list-style:none;margin:0;padding:0}.placement-list li{display:grid;grid-template-columns:1fr auto;gap:4px;padding:2px 0;border-bottom:1px solid var(--line);font-size:7px}.placement-list li:last-child{border-bottom:0}.placement-list span{color:var(--muted)}
-    .entity-coverage{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line)}.entity-count{padding:3px 4px;border-right:1px solid var(--line);border-bottom:1px solid var(--line)}.entity-count span{display:block;color:var(--muted);font-size:7px}.entity-count strong{font-size:8px}.campaign-findings h3{margin:0 0 3px;font-size:9px}.campaign-finding{padding:3px 0;border-top:1px solid var(--line)}.campaign-finding strong{display:block;font-size:8px}.campaign-finding p{margin:1px 0 0;color:var(--muted);font-size:7px;line-height:1.3}.entity-details{margin-top:4px;border-top:1px solid var(--line)}.entity-details details{border-bottom:1px solid var(--line)}.entity-details summary{cursor:pointer;list-style:none;display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:8px;font-weight:700}.entity-details summary::-webkit-details-marker{display:none}.entity-details summary span{color:var(--muted);font-weight:500;font-size:7px}.entity-details .table-wrap{margin-bottom:7px}.section-summary{margin:0 0 4px;color:var(--muted);font-size:7px}
-    .portfolio-entities{margin-top:18px}.portfolio-section{padding-top:15px;margin-top:15px;border-top:1px solid var(--line-strong)}.portfolio-section:first-child{margin-top:0}.footer{padding:9px 24px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:16px;color:var(--muted);font-size:9px}
-    @media(max-width:900px){.brand img{width:150px}.report-heading h1{font-size:20px}.health-line{grid-template-columns:repeat(2,1fr)}.health-item{border-bottom:1px solid var(--line)}.number-band{grid-template-columns:repeat(2,1fr)}.band-label{grid-column:1/-1;border-right:0;border-bottom:1px solid #e2dff5}.number-cell{border-bottom:1px solid #e2dff5}.editorial{grid-template-columns:1fr}.campaign-table-head{display:none}.dossier>summary{grid-template-columns:32px minmax(170px,1fr) repeat(2,minmax(70px,.5fr)) 34px}.dossier>summary .row-metric:nth-of-type(n+5),.campaign-summary{display:none}.dossier-body{padding-left:41px}.evidence-grid{grid-template-columns:1fr 1fr}.evidence-panel{border-right:0}.entity-coverage{grid-template-columns:repeat(2,1fr)}}
-    @media(max-width:560px){main{padding:0}.sheet{border:0;box-shadow:none}.masthead{padding:11px 15px;align-items:flex-start}.brand{gap:10px}.brand img{width:112px}.report-heading{padding-left:10px}.report-heading h1{font-size:16px}.meta{font-size:9px}.scope-pill{font-size:9px;padding:5px 7px}.intro,.editorial,.panorama{padding-left:15px;padding-right:15px}.health-line{grid-template-columns:1fr}.health-item{border-right:0}.number-band{margin-left:15px;margin-right:15px;grid-template-columns:1fr 1fr}.number-cell{padding:8px}.number-cell strong{font-size:16px}.decision-copy{grid-template-columns:1fr}.coverage-list{grid-template-columns:1fr auto}.dossier>summary{grid-template-columns:28px 1fr auto;min-height:44px;padding:8px 0}.dossier>summary .row-metric,.campaign-summary{display:none}.campaign-title small{font-size:9px}.campaign-title strong{font-size:12px}.disclosure{font-size:11px}.dossier-body{padding-left:0}.evidence-grid{grid-template-columns:1fr}.evidence-panel{padding:8px 0;border-right:0;border-bottom:1px solid var(--line)}.panel-head h3{font-size:11px}.placement-layout{grid-template-columns:80px 1fr}.placement-list li,.campaign-finding p,.entity-count span{font-size:9px}.entity-count strong,.campaign-finding strong{font-size:10px}.entity-coverage{grid-template-columns:1fr 1fr}.entity-details summary{min-height:44px;align-items:center;font-size:10px}.footer{padding:12px 15px;display:block}.footer span{display:block;margin-top:3px}}
-    @media print{html,body{background:#fff}main{max-width:none;padding:0}.sheet{border:0;box-shadow:none}.scope-pill{border-color:#bbb}.dossier,.portfolio-section,.decision-row{break-inside:avoid}.dossier:not([open])>.dossier-body,.entity-details details:not([open])>*:not(summary){display:block}.disclosure{display:none}.table-wrap{overflow:visible}table{min-width:0}.footer{display:none}}
+    :root{--ink:#172038;--ink-soft:#3c465f;--muted:#6f7789;--line:#e4e7ee;--line-strong:#d4d9e4;--paper:#fff;--canvas:#f6f7fa;--violet:#6257d9;--violet-dark:#4d43b8;--violet-soft:#f0effc;--teal:#0f8f87;--teal-soft:#e9f8f6;--red:#c94752;--red-soft:#fdf0f1;--amber:#a96716;--amber-soft:#fff5e6;--green:#257b67;--green-soft:#edf8f3;--gray:#7d8699;--gray-soft:#f1f3f6}
+    *{box-sizing:border-box}html{background:var(--canvas);scroll-behavior:smooth}body{margin:0;color:var(--ink);font:14px/1.58 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}button,summary{font:inherit}button{color:inherit}button:focus-visible,summary:focus-visible{outline:3px solid rgba(98,87,217,.35);outline-offset:2px}
+    main{max-width:1420px;margin:0 auto;padding:20px}.sheet{overflow:hidden;background:var(--paper);border:1px solid var(--line);border-radius:16px;box-shadow:0 16px 46px rgba(28,34,56,.07)}
+    .masthead{padding:22px 28px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:24px}.brand{display:flex;align-items:center;gap:24px;min-width:0}.brand img{width:176px;max-height:48px;object-fit:contain;object-position:left center}.report-heading{padding-left:24px;border-left:1px solid var(--line);min-width:0}.report-heading h1{margin:0;font-size:25px;line-height:1.2;letter-spacing:-.02em}.meta{margin-top:7px;display:flex;flex-wrap:wrap;gap:5px 16px;color:var(--muted);font-size:12px}.scope-pill{border:1px solid #d6d2f4;background:var(--violet-soft);color:var(--violet-dark);padding:8px 12px;border-radius:999px;font-weight:750;white-space:nowrap}
+    .intro{padding:24px 28px 0}.lede{margin:0;color:var(--ink-soft);font-size:15px}.lede strong{color:var(--ink);margin-right:5px}.health-line{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:18px}.health-item{padding:13px 14px;border:1px solid var(--line);border-radius:10px;min-width:0}.health-label{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px}.status-dot{width:8px;height:8px;border-radius:50%;background:var(--gray);flex:0 0 auto}.status-red .status-dot{background:var(--red)}.status-yellow .status-dot{background:var(--amber)}.status-green .status-dot{background:var(--green)}.health-item strong{display:block;margin-top:5px;font-size:15px}.health-item p{margin:3px 0 0;color:var(--muted);font-size:12px}
+    .number-band{display:grid;grid-template-columns:140px repeat(auto-fit,minmax(130px,1fr));margin:18px 28px 0;background:#f7f6fd;border:1px solid #e9e7f8;border-radius:10px;overflow:hidden}.band-label{display:flex;align-items:center;padding:14px 16px;font-size:16px;font-weight:800;border-right:1px solid #e1def4}.number-cell{padding:12px 14px;text-align:center;border-right:1px solid #e1def4}.number-cell:last-child{border-right:0}.number-cell span{display:block;color:var(--ink-soft);font-size:12px}.number-cell strong{display:block;margin-top:2px;color:var(--violet-dark);font-size:19px}
+    .report-section{padding:28px;border-top:1px solid var(--line)}.section-title{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:14px}.section-title h2{margin:0;font-size:21px;letter-spacing:-.01em}.section-title p{margin:3px 0 0;color:var(--muted);font-size:13px}.mode-note{color:var(--teal)!important;font-weight:700;text-align:right}
+    .tab-list{display:flex;gap:8px;margin-bottom:16px;padding-bottom:2px;overflow-x:auto;scrollbar-width:thin}.tab-button{flex:0 0 auto;border:1px solid var(--line-strong);background:#fff;padding:9px 13px;border-radius:9px;cursor:pointer;font-weight:700;color:var(--ink-soft)}.tab-button:hover{border-color:#bdb7ea;color:var(--violet-dark)}.tab-button[aria-selected="true"]{border-color:var(--violet);background:var(--violet);color:#fff;box-shadow:0 4px 12px rgba(98,87,217,.2)}.tab-count{margin-left:6px;opacity:.75;font-variant-numeric:tabular-nums}.tab-panel{min-width:0}.tab-panel[hidden]{display:none}
+    .action-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.action-card{padding:16px;border:1px solid var(--line);border-radius:12px;background:#fff}.action-card:only-child{grid-column:1/-1;max-width:900px}.action-top{display:flex;align-items:center;justify-content:space-between;gap:10px}.priority,.action-label{display:inline-flex;align-items:center;border-radius:999px;font-size:12px;font-weight:800}.priority{padding:3px 8px;background:var(--gray-soft);color:var(--gray)}.priority-p1{background:var(--red-soft);color:var(--red)}.priority-p2{background:var(--amber-soft);color:var(--amber)}.priority-p3{background:var(--green-soft);color:var(--green)}.action-label{color:var(--violet-dark)}.action-card h3{margin:10px 0 2px;font-size:16px}.entity{margin:0 0 9px;color:var(--muted);font-size:12px}.evidence{display:flex;flex-wrap:wrap;gap:6px}.evidence span{padding:4px 7px;border-radius:6px;background:var(--gray-soft);color:var(--ink-soft);font-size:12px}.action-copy{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.action-copy div{padding-top:10px;border-top:1px solid var(--line)}.action-copy strong{display:block;margin-bottom:3px;font-size:12px}.action-copy p{margin:0;color:var(--ink-soft);font-size:13px}.target-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}.target-chip{padding:4px 7px;border:1px solid #d8d4f2;border-radius:6px;background:var(--violet-soft);color:var(--violet-dark);font-size:12px}.empty-state{padding:24px;border:1px dashed var(--line-strong);border-radius:10px;color:var(--muted);text-align:center}
+    .coverage-layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:22px}.coverage-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.coverage-card{padding:13px;border:1px solid var(--line);border-radius:10px}.coverage-card span{display:block;color:var(--muted);font-size:12px}.coverage-card strong{display:block;margin-top:3px;font-size:16px}.coverage-card small{display:block;margin-top:2px;color:var(--teal);font-size:12px}.coverage-summary{display:grid;grid-template-columns:1fr auto;gap:7px 14px;margin:0}.coverage-summary dt{color:var(--muted)}.coverage-summary dd{margin:0;text-align:right;font-weight:750}.selection-list{margin-top:14px;border-top:1px solid var(--line)}.selection-item{padding:11px 0;border-bottom:1px solid var(--line)}.selection-item strong{display:block}.selection-item p{margin:3px 0 0;color:var(--muted);font-size:12px}.note-list{margin:14px 0 0;padding-left:18px;color:var(--muted);font-size:12px}.note-list li+li{margin-top:4px}
+    .data-panel-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:10px}.data-panel-head h3{margin:0;font-size:17px}.data-panel-head p{margin:3px 0 0;color:var(--muted);font-size:12px}.coverage-badge{flex:0 0 auto;padding:5px 8px;border-radius:7px;background:var(--teal-soft);color:var(--teal);font-size:12px;font-weight:750}.coverage-badge.unknown{background:var(--amber-soft);color:var(--amber)}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:9px}table{width:100%;border-collapse:collapse;min-width:720px}th,td{text-align:left;padding:10px 11px;border-bottom:1px solid var(--line);vertical-align:top;font-size:12px}th{position:sticky;top:0;z-index:1;color:var(--muted);font-size:11px;font-weight:750;letter-spacing:.02em;background:#fafafd}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#fbfbfe}.table-pager{display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:10px}.pager-button{border:1px solid var(--line-strong);background:#fff;border-radius:7px;padding:6px 10px;cursor:pointer}.pager-button:disabled{cursor:not-allowed;opacity:.45}.pager-status{color:var(--muted);font-size:12px}
+    .dossiers{border-top:1px solid var(--line-strong)}.dossier{border-bottom:1px solid var(--line-strong)}.dossier>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:14px;padding:14px 2px}.dossier>summary::-webkit-details-marker{display:none}.campaign-index{font:750 12px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}.campaign-title{min-width:190px;flex:1}.campaign-title small{display:block;color:var(--muted);font-size:11px;letter-spacing:.03em}.campaign-title strong{display:block;margin-top:2px;font-size:15px}.campaign-summary{flex:1.4;color:var(--ink-soft);font-size:12px}.disclosure{color:var(--violet);font-size:12px;font-weight:750}.disclosure::after{content:"展开"}.dossier[open] .disclosure::after{content:"收起"}.dossier-body{padding:0 0 18px 34px}.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px}.metric-card{padding:10px;border-radius:8px;background:var(--gray-soft)}.metric-card span{display:block;color:var(--muted);font-size:11px}.metric-card strong{display:block;margin-top:2px;font-size:15px}.evidence-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.evidence-panel{min-width:0;padding:13px;border:1px solid var(--line);border-radius:10px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.panel-head h3{margin:0;font-size:14px}.legend{display:flex;gap:9px;color:var(--muted);font-size:11px}.legend span{display:flex;align-items:center;gap:4px}.legend i{width:11px;height:3px;background:var(--violet)}.legend span+span i{background:var(--teal)}.trend-image{display:block;width:100%;height:150px;object-fit:contain}.placement-layout{display:grid;grid-template-columns:112px 1fr;align-items:center;gap:12px}.placement-image{display:block;width:110px;height:110px}.placement-list{list-style:none;margin:0;padding:0}.placement-list li{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);font-size:12px}.placement-list li:last-child{border-bottom:0}.placement-list span{color:var(--muted)}.campaign-finding{padding:9px 0;border-top:1px solid var(--line)}.campaign-finding:first-of-type{border-top:0}.campaign-finding strong{display:block;font-size:13px}.campaign-finding p{margin:3px 0 0;color:var(--ink-soft);font-size:12px}.entity-details{margin-top:12px}.all-entities>summary,.entity-details details>summary{cursor:pointer;list-style:none;display:flex;justify-content:space-between;gap:12px;padding:10px 0;font-weight:750}.all-entities>summary::-webkit-details-marker,.entity-details details>summary::-webkit-details-marker{display:none}.entity-details details{border-top:1px solid var(--line)}.entity-details summary span{color:var(--muted);font-weight:500;font-size:12px}.section-summary{margin:0 0 8px;color:var(--muted);font-size:12px}.footer{padding:14px 28px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:18px;color:var(--muted);font-size:11px}
+    @media(max-width:980px){.health-line{grid-template-columns:repeat(2,1fr)}.action-grid{grid-template-columns:1fr}.coverage-layout{grid-template-columns:1fr}.coverage-cards{grid-template-columns:repeat(2,1fr)}.evidence-grid{grid-template-columns:1fr}.campaign-summary{display:none}}
+    @media(max-width:640px){main{padding:0}.sheet{border:0;border-radius:0;box-shadow:none}.masthead{padding:16px;align-items:flex-start}.brand{gap:12px}.brand img{width:108px}.report-heading{padding-left:12px}.report-heading h1{font-size:18px}.meta{font-size:10px}.scope-pill{font-size:10px;padding:6px 8px}.intro,.report-section{padding-left:16px;padding-right:16px}.health-line{grid-template-columns:1fr}.number-band{margin-left:16px;margin-right:16px;grid-template-columns:1fr 1fr}.band-label{grid-column:1/-1;border-right:0;border-bottom:1px solid #e1def4}.number-cell{border-bottom:1px solid #e1def4}.section-title{align-items:flex-start}.mode-note{max-width:45%}.action-copy{grid-template-columns:1fr}.coverage-cards{grid-template-columns:1fr 1fr}.dossier>summary{min-height:48px}.campaign-title{min-width:0}.dossier-body{padding-left:0}.metric-grid{grid-template-columns:repeat(2,1fr)}.placement-layout{grid-template-columns:90px 1fr}.placement-image{width:88px;height:88px}.footer{padding:14px 16px;display:block}.footer span{display:block;margin-top:3px}}
+    @media print{html,body{background:#fff}main{max-width:none;padding:0}.sheet{border:0;box-shadow:none}.tab-list,.table-pager,.disclosure{display:none!important}.tab-panel[hidden]{display:block!important}.tab-panel{margin-bottom:20px}.dossier,.action-card,.coverage-card{break-inside:avoid}.dossier:not([open])>.dossier-body,.entity-details details:not([open])>*:not(summary){display:block}.table-wrap{overflow:visible}table{min-width:0}.paged-row{display:table-row!important}.footer{display:none}}
   </style>
 </head>
 <body>
@@ -496,25 +586,75 @@ function renderReport(report, logo) {
       <div class="health-line">${renderRatings(report.ratings)}</div>
     </section>
     <section class="number-band"><div class="band-label">数字摘要</div>${renderOverview(report.overview, report.scope.currency)}</section>
-    <section class="editorial">
-      <div>
-        <div class="section-title"><h2>本期判断</h2><p>按证据门槛排序</p></div>
-        <div class="decision-list">${renderDecisionRows(problems, report.scope.currency)}</div>
-      </div>
-      <aside>
-        <section class="aside-section"><h2>增长机会</h2>${renderOpportunities(opportunities, report.scope.currency)}</section>
-        <section class="aside-section"><h2>覆盖与限制</h2>${renderCoverage(report)}<h3>口径与限制</h3>${renderMethodNotes(report)}</section>
-      </aside>
+    <section class="report-section action-section">
+      <div class="section-title"><div><h2>优先行动</h2><p>先看要做什么，再查看支持证据</p></div><p class="mode-note">建议仅供决策 · 未执行修改</p></div>
+      ${renderActionTabs(actionGroups, report.scope.currency)}
     </section>
-    <section class="panorama">
-      <div class="section-title"><div><h2>活动全景</h2><p>${escapeHtml(campaignSection.summary)}</p></div><p class="mode-note">${escapeHtml(modeCoverageLabel(report))}</p></div>
-      ${report.analysisMode === "campaign-drilldown"
-        ? renderCampaignDossiers(report)
-        : `${renderSectionTable(campaignSection, report.scope.currency)}${renderPortfolioSections(portfolioSections, report.scope.currency)}`}
+    <section class="report-section coverage-section">
+      <div class="section-title"><div><h2>查询覆盖</h2><p>覆盖范围和下钻选择都可追溯</p></div><p class="mode-note">${escapeHtml(modeCoverageLabel(report))}</p></div>
+      ${renderCoverage(report)}
     </section>
-    <footer class="footer"><span>由 SellerSpace 实际只读接口数据生成</span><span>未执行任何广告修改 · 明细样本按花费降序</span></footer>
+    <section class="report-section data-section">
+      <div class="section-title"><div><h2>数据明细</h2><p>六类实体通过 Tab 切换，每页显示 ${TABLE_PAGE_SIZE} 行</p></div><p class="mode-note">按花费降序</p></div>
+      ${renderDataTabs(orderedSections, report)}
+    </section>
+    <section class="report-section drilldown-section">
+      <div class="section-title"><div><h2>证据下钻</h2><p>仅展示达到诊断门槛并完成补充查询的 Campaign</p></div><p class="mode-note">${escapeHtml(String(report.campaignDrilldowns.length))} 个 Campaign</p></div>
+      ${renderCampaignDossiers(report)}
+    </section>
+    <footer class="footer"><span>由 SellerSpace 实际只读接口数据生成</span><span>未执行任何广告修改 · 业务查询次数仅作记录</span></footer>
   </article>
 </main>
+<script>
+(() => {
+  for (const root of document.querySelectorAll('[data-tabs]')) {
+    const tabs = [...root.querySelectorAll('[role="tab"]')];
+    const panels = tabs.map((tab) => document.getElementById(tab.getAttribute('aria-controls')));
+    const activate = (index, moveFocus) => {
+      tabs.forEach((tab, tabIndex) => {
+        const active = tabIndex === index;
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = active ? 0 : -1;
+        panels[tabIndex].hidden = !active;
+      });
+      if (moveFocus) tabs[index].focus();
+    };
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => activate(index, false));
+      tab.addEventListener('keydown', (event) => {
+        let next = index;
+        if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+        else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = tabs.length - 1;
+        else return;
+        event.preventDefault();
+        activate(next, true);
+      });
+    });
+    if (tabs.length) activate(0, false);
+  }
+
+  for (const root of document.querySelectorAll('[data-paged-table]')) {
+    const rows = [...root.querySelectorAll('.paged-row')];
+    const previous = root.querySelector('[data-page-prev]');
+    const next = root.querySelector('[data-page-next]');
+    const status = root.querySelector('[data-page-status]');
+    const size = Number(root.dataset.pageSize) || ${TABLE_PAGE_SIZE};
+    const pageCount = Math.max(1, Math.ceil(rows.length / size));
+    let page = 0;
+    const render = () => {
+      rows.forEach((row, index) => { row.hidden = index < page * size || index >= (page + 1) * size; });
+      previous.disabled = page === 0;
+      next.disabled = page >= pageCount - 1;
+      status.textContent = rows.length ? '第 ' + (page + 1) + ' / ' + pageCount + ' 页 · 共 ' + rows.length + ' 行' : '无数据';
+    };
+    previous.addEventListener('click', () => { if (page > 0) { page -= 1; render(); } });
+    next.addEventListener('click', () => { if (page < pageCount - 1) { page += 1; render(); } });
+    render();
+  }
+})();
+</script>
 </body>
 </html>`;
 }
@@ -524,7 +664,7 @@ function renderRatings(ratings) {
     <div class="health-item status-${escapeAttribute(rating.status)}">
       <span class="health-label"><i class="status-dot"></i>${escapeHtml(rating.label)}</span>
       <strong>${escapeHtml(statusLabel(rating.status))}</strong>
-      <p title="${escapeHtml(rating.summary)}">${escapeHtml(rating.summary)}</p>
+      <p>${escapeHtml(rating.summary)}</p>
     </div>`).join("");
 }
 
@@ -532,47 +672,80 @@ function renderOverview(metrics, defaultCurrency) {
   if (metrics.length === 0) {
     return '<div class="number-cell"><span>广告大盘</span><strong>—</strong></div>';
   }
-  return metrics.slice(0, 6).map((metric) => `
+  return metrics.map((metric) => `
     <div class="number-cell"><span>${escapeHtml(metric.label)}</span><strong>${escapeHtml(formatValue(metric.value, metric.format, metric.currency || defaultCurrency))}</strong></div>`).join("");
 }
 
-function renderDecisionRows(findings, defaultCurrency) {
-  if (findings.length === 0) return '<p class="empty">未发现达到证据门槛的问题。</p>';
-  return findings.map((finding) => renderDecisionRow(finding, defaultCurrency)).join("");
+function groupFindings(findings) {
+  const groups = { search: [], stop: [], budget: [], observe: [] };
+  for (const finding of findings) {
+    const type = finding.action?.type;
+    if (type === "harvest-search-term") groups.search.push(finding);
+    else if (["negative-search-term", "lower-bid", "pause"].includes(type)) groups.stop.push(finding);
+    else if (type === "increase-budget") groups.budget.push(finding);
+    else if (!type && finding.kind === "opportunity" && finding.entityType === "searchQuery") groups.search.push(finding);
+    else if (!type && finding.kind === "opportunity" && finding.dimension === "budget") groups.budget.push(finding);
+    else if (!type && finding.kind === "problem") groups.stop.push(finding);
+    else groups.observe.push(finding);
+  }
+  return groups;
 }
 
-function renderDecisionRow(finding, defaultCurrency) {
-  return `
-    <article class="decision-row">
-      <div class="priority priority-${escapeAttribute(finding.priority.toLowerCase())}">${escapeHtml(finding.priority)}</div>
-      <div>
-        <h3>${escapeHtml(finding.title)}</h3>
-        <p class="entity">${escapeHtml(finding.entityName)} · ${escapeHtml(finding.entityType)} · ${escapeHtml(confidenceLabel(finding.confidence))}</p>
-        <div class="evidence">${finding.evidence.map((metric) => `<span>${escapeHtml(metric.label)} ${escapeHtml(formatValue(metric.value, metric.format, metric.currency || defaultCurrency))}</span>`).join("")}</div>
-        <div class="decision-copy"><p><strong>判断：</strong>${escapeHtml(finding.reasoning)}</p><p><strong>建议：</strong>${escapeHtml(finding.recommendation)}</p></div>
-      </div>
-    </article>`;
+function renderActionTabs(groups, defaultCurrency) {
+  const tabs = [
+    ["search", "搜索词机会", groups.search],
+    ["stop", "止损与否定", groups.stop],
+    ["budget", "活动预算", groups.budget],
+    ["observe", "持续观察", groups.observe],
+  ];
+  return renderTabs("actions", "优化建议分类", tabs.map(([key, label, findings]) => ({
+    key,
+    label,
+    count: findings.length,
+    content: renderActionCards(findings, defaultCurrency),
+  })));
 }
 
-function renderOpportunities(findings, defaultCurrency) {
-  if (findings.length === 0) return '<p class="empty">本期未发现达到门槛的扩量机会。</p>';
-  return findings.map((finding) => `
-    <article class="opportunity">
-      <strong>${escapeHtml(finding.title)}</strong>
-      <p>${escapeHtml(finding.entityName)} · ${finding.evidence.map((metric) => `${escapeHtml(metric.label)} ${escapeHtml(formatValue(metric.value, metric.format, metric.currency || defaultCurrency))}`).join(" · ")}</p>
-      <p>${escapeHtml(finding.recommendation)}</p>
-    </article>`).join("");
+function renderActionCards(findings, defaultCurrency) {
+  if (findings.length === 0) return '<div class="empty-state">本期没有达到该类行动门槛的对象。</div>';
+  return `<div class="action-grid">${findings.map((finding) => renderActionCard(finding, defaultCurrency)).join("")}</div>`;
+}
+
+function renderActionCard(finding, defaultCurrency) {
+  const actionLabel = finding.action?.label || finding.recommendation;
+  const targets = finding.action?.existingTargets || [];
+  return `<article class="action-card">
+    <div class="action-top"><span class="priority priority-${escapeAttribute(finding.priority.toLowerCase())}">${escapeHtml(finding.priority)}</span><span class="action-label">${escapeHtml(actionLabel)}</span></div>
+    <h3>${escapeHtml(finding.title)}</h3>
+    <p class="entity">${escapeHtml(finding.entityName)} · ${escapeHtml(finding.entityType)} · ${escapeHtml(confidenceLabel(finding.confidence))}</p>
+    <div class="evidence">${finding.evidence.map((metric) => `<span>${escapeHtml(metric.label)} ${escapeHtml(formatValue(metric.value, metric.format, metric.currency || defaultCurrency))}</span>`).join("")}</div>
+    <div class="action-copy"><div><strong>为什么</strong><p>${escapeHtml(finding.reasoning)}</p></div><div><strong>建议动作</strong><p>${escapeHtml(finding.recommendation)}</p></div></div>
+    ${targets.length ? `<div class="target-list" aria-label="当前投放位置">${targets.map((target) => `<span class="target-chip">${escapeHtml(targetLevelLabel(target.level))} · ${escapeHtml(target.name || String(target.id))}</span>`).join("")}</div>` : ""}
+  </article>`;
 }
 
 function renderCoverage(report) {
-  return `<dl class="coverage-list">
-    <dt>查询模式</dt><dd>${escapeHtml(modeLabel(report.analysisMode))}</dd>
-    <dt>启用活动</dt><dd>${escapeHtml(String(report.coverage.enabledCampaignCount))}</dd>
-    <dt>完整下钻</dt><dd>${escapeHtml(String(report.coverage.fullyDrilledCampaignIds.length))}</dd>
-    <dt>趋势覆盖</dt><dd>${escapeHtml(String(report.coverage.historyCampaignIds.length))}</dd>
-    <dt>广告位覆盖</dt><dd>${escapeHtml(String(report.coverage.placementCampaignIds.length))}</dd>
-    <dt>业务查询</dt><dd>${escapeHtml(String(report.coverage.businessCallCount))} 次</dd>
-  </dl>`;
+  const entities = report.coverage.entities || [];
+  const selected = report.coverage.selectedCampaigns || [];
+  const cards = entities.length
+    ? `<div class="coverage-cards">${CORE_SECTION_KEYS.map((key) => entities.find((item) => item.key === key)).filter(Boolean).map(renderCoverageCard).join("")}</div>`
+    : `<dl class="coverage-summary">
+        <dt>分析模式</dt><dd>${escapeHtml(modeLabel(report.analysisMode))}</dd>
+        <dt>启用 Campaign</dt><dd>${escapeHtml(String(report.coverage.enabledCampaignCount))}</dd>
+        <dt>完整下钻</dt><dd>${escapeHtml(String(report.coverage.fullyDrilledCampaignIds.length))}</dd>
+        <dt>趋势覆盖</dt><dd>${escapeHtml(String(report.coverage.historyCampaignIds.length))}</dd>
+        <dt>广告位覆盖</dt><dd>${escapeHtml(String(report.coverage.placementCampaignIds.length))}</dd>
+      </dl>`;
+  const selections = selected.length
+    ? `<div class="selection-list">${selected.map((campaign) => `<div class="selection-item"><strong>${escapeHtml(campaign.campaignName)}</strong><p>${escapeHtml(campaign.reasons.join("；"))} · 日趋势已查${campaign.placementQueried ? " · 广告位已查" : ""}</p></div>`).join("")}</div>`
+    : '<p class="empty-state">本期没有 Campaign 达到证据下钻门槛。</p>';
+  return `<div class="coverage-layout"><div>${cards}${selections}</div><aside><dl class="coverage-summary"><dt>分析模式</dt><dd>${escapeHtml(modeLabel(report.analysisMode))}</dd><dt>启用 Campaign</dt><dd>${escapeHtml(String(report.coverage.enabledCampaignCount))}</dd><dt>证据下钻</dt><dd>${escapeHtml(String(report.campaignDrilldowns.length))}</dd><dt>日趋势</dt><dd>${escapeHtml(String(report.coverage.historyCampaignIds.length))}</dd><dt>广告位</dt><dd>${escapeHtml(String(report.coverage.placementCampaignIds.length))}</dd><dt>业务查询</dt><dd>${escapeHtml(String(report.coverage.businessCallCount))} 次</dd></dl>${renderMethodNotes(report)}</aside></div>`;
+}
+
+function renderCoverageCard(entity) {
+  const coverage = entity.spendCoverage === null ? "覆盖度未知" : `花费覆盖 ${formatValue(entity.spendCoverage, "ratio")}`;
+  const detail = entity.status === "unknown" ? coverage : `${coverage} · ${coverageStatusLabel(entity.status)}`;
+  return `<article class="coverage-card"><span>${escapeHtml(sectionLabel(entity.key))}</span><strong>${escapeHtml(String(entity.queriedCount))} / ${escapeHtml(String(entity.totalCount))}</strong><small>${escapeHtml(detail)}</small></article>`;
 }
 
 function renderMethodNotes(report) {
@@ -580,120 +753,95 @@ function renderMethodNotes(report) {
     ...report.assumptions.map((item) => `假设：${item}`),
     ...report.limitations.map((item) => `限制：${item}`),
   ];
-  return renderList(notes, "note-list");
+  if (notes.length === 0) return "";
+  return `<ul class="note-list">${notes.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function renderDataTabs(sections, report) {
+  const coverageByKey = new Map((report.coverage.entities || []).map((item) => [item.key, item]));
+  return renderTabs("data", "广告实体数据", sections.map((section, index) => ({
+    key: `${escapeAttribute(section.key)}-${index}`,
+    label: sectionLabel(section.key, section.title),
+    count: section.sampledCount,
+    content: renderDataPanel(section, coverageByKey.get(section.key), report.scope.currency, `top-${index}`),
+  })));
+}
+
+function renderDataPanel(section, coverage, defaultCurrency, tableId) {
+  const coverageText = coverage
+    ? coverage.spendCoverage === null
+      ? "覆盖度未知"
+      : `花费覆盖 ${formatValue(coverage.spendCoverage, "ratio")}`
+    : `展示 ${section.sampledCount} / ${section.totalCount}`;
+  const unknownClass = coverage?.status === "unknown" ? " unknown" : "";
+  return `<div class="data-panel-head"><div><h3>${escapeHtml(section.title)}</h3><p>${escapeHtml(section.summary)}</p></div><span class="coverage-badge${unknownClass}">${escapeHtml(coverageText)} · ${escapeHtml(String(section.sampledCount))}/${escapeHtml(String(section.totalCount))}</span></div>${renderSectionTable(section, defaultCurrency, tableId)}`;
+}
+
+function renderTabs(prefix, label, tabs) {
+  if (tabs.length === 0) return '<div class="empty-state">没有可展示的数据。</div>';
+  const buttons = tabs.map((tab, index) => `<button type="button" class="tab-button" role="tab" id="${prefix}-tab-${escapeAttribute(tab.key)}" aria-controls="${prefix}-panel-${escapeAttribute(tab.key)}" aria-selected="${index === 0}" tabindex="${index === 0 ? 0 : -1}">${escapeHtml(tab.label)}<span class="tab-count">${escapeHtml(String(tab.count))}</span></button>`).join("");
+  const panels = tabs.map((tab, index) => `<section class="tab-panel" role="tabpanel" id="${prefix}-panel-${escapeAttribute(tab.key)}" aria-labelledby="${prefix}-tab-${escapeAttribute(tab.key)}"${index === 0 ? "" : " hidden"}>${tab.content}</section>`).join("");
+  return `<div data-tabs><div class="tab-list" role="tablist" aria-label="${escapeHtml(label)}">${buttons}</div>${panels}</div>`;
 }
 
 function renderCampaignDossiers(report) {
   if (report.campaignDrilldowns.length === 0) {
-    return '<div class="dossiers"><p class="empty">当前没有启用中的广告活动，无需继续下钻。</p></div>';
+    return '<div class="empty-state">本期没有 Campaign 达到证据下钻门槛。</div>';
   }
-  const headerMetrics = Array.from(
-    { length: 4 },
-    (_, index) => report.campaignDrilldowns[0].metrics[index] || { label: "指标" },
-  );
-  return `<div class="dossiers"><div class="campaign-table-head"><span>#</span><span>活动（状态）</span>${headerMetrics.map((metric) => `<span>${escapeHtml(metric.label)}</span>`).join("")}<span>诊断摘要</span><span></span></div>${report.campaignDrilldowns.map((drilldown, index) => renderCampaignDossier(
-    drilldown,
-    index,
-    report.findings,
-    report.scope.currency,
-  )).join("")}</div>`;
+  const selectedMap = new Map((report.coverage.selectedCampaigns || []).map((item) => [String(item.campaignId), item]));
+  return `<div class="dossiers">${report.campaignDrilldowns.map((drilldown, index) => renderCampaignDossier(drilldown, index, report.findings, report.scope.currency, selectedMap.get(String(drilldown.campaignId)))).join("")}</div>`;
 }
 
-function renderCampaignDossier(drilldown, index, findings, defaultCurrency) {
+function renderCampaignDossier(drilldown, index, findings, defaultCurrency, selection) {
   const campaignId = String(drilldown.campaignId);
-  const campaignFindings = findings.filter((finding) => String(finding.campaignId || "") === campaignId);
+  const campaignFindings = findings.filter((finding) => String(finding.campaignId ?? "") === campaignId);
   const trendImage = renderTrendPng(drilldown.trend);
   const placementImage = renderPlacementPng(drilldown.placements);
-  return `
-    <details class="dossier"${index === 0 ? " open" : ""}>
-      <summary>
-        <span class="campaign-index">${String(index + 1).padStart(2, "0")}</span>
-        <span class="campaign-title"><small>${escapeHtml(drilldown.adType)} · ENABLED · ${escapeHtml(statusLabel(drilldown.healthStatus))}</small><strong>${escapeHtml(drilldown.campaignName)}</strong></span>
-        ${renderCampaignRowMetrics(drilldown.metrics, defaultCurrency)}
-        <span class="campaign-summary">${escapeHtml(drilldown.summary)}</span>
-        <span class="disclosure" aria-hidden="true"></span>
-      </summary>
-      <div class="dossier-body">
-        <div class="evidence-grid">
-          <section class="evidence-panel">
-            <div class="panel-head"><h3>层级覆盖</h3></div>
-            <div class="entity-coverage">${drilldown.sections.map((section) => `<div class="entity-count"><span>${escapeHtml(section.title)}</span><strong>${escapeHtml(String(section.sampledCount))} / ${escapeHtml(String(section.totalCount))}</strong></div>`).join("")}</div>
-          </section>
-          <section class="evidence-panel">
-            <div class="panel-head"><h3>近期待势</h3><span class="legend"><span><i></i>花费</span><span><i></i>销售额</span></span></div>
-            ${trendImage ? `<img class="trend-image" alt="活动花费与销售额趋势" src="data:image/png;base64,${trendImage}">` : '<p class="empty">成功返回空趋势。</p>'}
-          </section>
-          <section class="evidence-panel">
-            <div class="panel-head"><h3>广告位分布</h3></div>
-            ${renderPlacementView(drilldown.placements, placementImage, defaultCurrency)}
-          </section>
-          <section class="evidence-panel campaign-findings">
-            <div class="panel-head"><h3>活动结论</h3></div>
-            <p class="campaign-summary">${escapeHtml(drilldown.summary)}</p>
-            ${renderCampaignFindings(campaignFindings)}
-          </section>
-        </div>
-        <div class="entity-details"><details class="all-entities"><summary>查看 5 类实体明细<span>每类最多 Top 50</span></summary><div class="entity-stack">${drilldown.sections.map((section) => renderNestedSection(section, defaultCurrency)).join("")}</div></details></div>
+  const summary = selection?.reasons?.length ? selection.reasons.join("；") : drilldown.summary;
+  return `<details class="dossier"${index === 0 ? " open" : ""}>
+    <summary><span class="campaign-index">${String(index + 1).padStart(2, "0")}</span><span class="campaign-title"><small>${escapeHtml(drilldown.adType)} · ENABLED · ${escapeHtml(statusLabel(drilldown.healthStatus))}</small><strong>${escapeHtml(drilldown.campaignName)}</strong></span><span class="campaign-summary">${escapeHtml(summary)}</span><span class="disclosure" aria-hidden="true"></span></summary>
+    <div class="dossier-body">
+      <div class="metric-grid">${drilldown.metrics.map((metric) => `<div class="metric-card"><span>${escapeHtml(metric.label)}</span><strong>${escapeHtml(formatValue(metric.value, metric.format, metric.currency || defaultCurrency))}</strong></div>`).join("")}</div>
+      <div class="evidence-grid">
+        <section class="evidence-panel"><div class="panel-head"><h3>近 30 天趋势</h3><span class="legend"><span><i></i>花费</span><span><i></i>销售额</span></span></div>${trendImage ? `<img class="trend-image" alt="活动花费与销售额趋势" src="data:image/png;base64,${trendImage}">` : '<p class="empty-state">成功返回空趋势。</p>'}</section>
+        <section class="evidence-panel"><div class="panel-head"><h3>广告位表现</h3></div>${renderPlacementView(drilldown.placements, placementImage, defaultCurrency)}</section>
+        <section class="evidence-panel"><div class="panel-head"><h3>活动结论</h3></div><p>${escapeHtml(drilldown.summary)}</p>${renderCampaignFindings(campaignFindings)}</section>
+        <section class="evidence-panel"><div class="panel-head"><h3>层级覆盖</h3></div><div class="coverage-cards">${drilldown.sections.map((section) => `<article class="coverage-card"><span>${escapeHtml(section.title)}</span><strong>${escapeHtml(String(section.sampledCount))} / ${escapeHtml(String(section.totalCount))}</strong><small>${escapeHtml(section.summary)}</small></article>`).join("")}</div></section>
       </div>
-    </details>`;
-}
-
-function renderCampaignRowMetrics(metrics, defaultCurrency) {
-  return Array.from({ length: 4 }, (_, index) => {
-    const metric = metrics[index];
-    if (!metric) return '<span class="row-metric"><small>指标</small><strong>—</strong></span>';
-    return `<span class="row-metric"><small>${escapeHtml(metric.label)}</small><strong>${escapeHtml(formatValue(metric.value, metric.format, metric.currency || defaultCurrency))}</strong></span>`;
-  }).join("");
-}
-
-function renderCampaignFindings(findings) {
-  if (findings.length === 0) return '<p class="empty">未发现达到门槛的活动级判断。</p>';
-  return findings.slice(0, 1).map((finding) => `<div class="campaign-finding"><strong>${escapeHtml(finding.priority)} · ${escapeHtml(finding.title)}</strong><p>${escapeHtml(finding.recommendation)}</p></div>`).join("");
-}
-
-function renderPlacementView(placements, image, defaultCurrency) {
-  if (placements.length === 0 || !image) return '<p class="empty">该广告类型没有可用广告位数据。</p>';
-  return `<div class="placement-layout">
-    <img class="placement-image" alt="广告位花费份额" src="data:image/png;base64,${image}">
-    <ul class="placement-list">${placements.map((placement) => `<li><span>${escapeHtml(placement.name)}</span><strong>${escapeHtml(formatValue(placement.share, "ratio", defaultCurrency))} · ${escapeHtml(formatValue(placement.cost, "currency", defaultCurrency))}</strong></li>`).join("")}</ul>
-  </div>`;
-}
-
-function renderNestedSection(section, defaultCurrency) {
-  return `<details>
-    <summary>${escapeHtml(section.title)}<span>展示 ${escapeHtml(String(section.sampledCount))} / ${escapeHtml(String(section.totalCount))}</span></summary>
-    <p class="section-summary">${escapeHtml(section.summary)}</p>
-    ${renderSectionTable(section, defaultCurrency)}
+      <div class="entity-details"><details class="all-entities"><summary>查看该 Campaign 的五类实体明细<span>已获取数据全部可翻页查看</span></summary>${drilldown.sections.map((section, sectionIndex) => renderNestedSection(section, defaultCurrency, `drill-${index}-${sectionIndex}`)).join("")}</details></div>
+    </div>
   </details>`;
 }
 
-function renderPortfolioSections(sections, defaultCurrency) {
-  return `<div class="portfolio-entities">${sections.map((section) => `
-    <section class="portfolio-section">
-      <div class="section-title"><div><h2>${escapeHtml(section.title)}</h2><p>${escapeHtml(section.summary)}</p></div><p>展示 ${escapeHtml(String(section.sampledCount))} / ${escapeHtml(String(section.totalCount))}</p></div>
-      ${renderSectionTable(section, defaultCurrency)}
-    </section>`).join("")}</div>`;
+function renderCampaignFindings(findings) {
+  if (findings.length === 0) return '<p class="empty-state">没有达到门槛的 Campaign 级判断。</p>';
+  return findings.map((finding) => `<div class="campaign-finding"><strong>${escapeHtml(finding.priority)} · ${escapeHtml(finding.title)}</strong><p>${escapeHtml(finding.recommendation)}</p></div>`).join("");
 }
 
-function renderSectionTable(section, defaultCurrency) {
-  const header = section.columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("");
+function renderPlacementView(placements, image, defaultCurrency) {
+  if (placements.length === 0 || !image) return '<p class="empty-state">该活动没有可用广告位数据。</p>';
+  return `<div class="placement-layout"><img class="placement-image" alt="广告位花费份额" src="data:image/png;base64,${image}"><ul class="placement-list">${placements.map((placement) => `<li><span>${escapeHtml(placement.name)}</span><strong>${escapeHtml(formatValue(placement.share, "ratio", defaultCurrency))} · ${escapeHtml(formatValue(placement.cost, "currency", defaultCurrency))}</strong></li>`).join("")}</ul></div>`;
+}
+
+function renderNestedSection(section, defaultCurrency, tableId) {
+  return `<details><summary>${escapeHtml(section.title)}<span>${escapeHtml(String(section.sampledCount))} / ${escapeHtml(String(section.totalCount))}</span></summary><p class="section-summary">${escapeHtml(section.summary)}</p>${renderSectionTable(section, defaultCurrency, tableId)}</details>`;
+}
+
+function renderSectionTable(section, defaultCurrency, tableId) {
+  const safeId = escapeAttribute(tableId);
+  const header = section.columns.map((column) => `<th scope="col">${escapeHtml(column.label)}</th>`).join("");
   const body = section.rows.length === 0
-    ? `<tr><td colspan="${section.columns.length || 1}" class="empty">成功返回空列表</td></tr>`
-    : section.rows.map((row) => `<tr>${section.columns.map((column) => `<td>${escapeHtml(formatValue(row[column.key], column.format, column.currency || defaultCurrency))}</td>`).join("")}</tr>`).join("");
-  return `<div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>`;
-}
-
-function renderList(items, className = "note-list") {
-  if (items.length === 0) return '<p class="empty">—</p>';
-  return `<ul class="${escapeAttribute(className)}">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+    ? `<tr><td colspan="${section.columns.length || 1}" class="empty-state">成功返回空列表</td></tr>`
+    : section.rows.map((row) => `<tr class="paged-row">${section.columns.map((column) => `<td>${escapeHtml(formatValue(row[column.key], column.format, column.currency || defaultCurrency))}</td>`).join("")}</tr>`).join("");
+  return `<div data-paged-table data-page-size="${TABLE_PAGE_SIZE}" id="table-${safeId}"><div class="table-wrap"><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div><div class="table-pager"><button type="button" class="pager-button" data-page-prev aria-label="上一页">上一页</button><span class="pager-status" data-page-status aria-live="polite"></span><button type="button" class="pager-button" data-page-next aria-label="下一页">下一页</button></div></div>`;
 }
 
 function renderTrendPng(points) {
   const usable = points.filter((point) => Number.isFinite(point.cost) || Number.isFinite(point.sales));
   if (usable.length === 0) return null;
-  const width = 560;
-  const height = 170;
-  const padding = { left: 22, right: 14, top: 14, bottom: 20 };
+  const width = 680;
+  const height = 220;
+  const padding = { left: 26, right: 16, top: 16, bottom: 24 };
   const raster = createRaster(width, height, [255, 255, 255, 255]);
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
@@ -701,16 +849,13 @@ function renderTrendPng(points) {
     const y = Math.round(padding.top + (plotHeight * index) / 4);
     drawLine(raster, width, height, padding.left, y, width - padding.right, y, [229, 231, 238, 255], 1);
   }
-  const maximum = Math.max(
-    1,
-    ...usable.flatMap((point) => [Number(point.cost) || 0, Number(point.sales) || 0]),
-  );
+  const maximum = Math.max(1, ...usable.flatMap((point) => [Number(point.cost) || 0, Number(point.sales) || 0]));
   const xFor = (index) => usable.length === 1
     ? Math.round(padding.left + plotWidth / 2)
     : Math.round(padding.left + (plotWidth * index) / (usable.length - 1));
   const yFor = (value) => Math.round(padding.top + plotHeight - ((Number(value) || 0) / maximum) * plotHeight);
   drawSeries(raster, width, height, usable.map((point, index) => [xFor(index), yFor(point.cost)]), [98, 87, 217, 255]);
-  drawSeries(raster, width, height, usable.map((point, index) => [xFor(index), yFor(point.sales)]), [15, 159, 149, 255]);
+  drawSeries(raster, width, height, usable.map((point, index) => [xFor(index), yFor(point.sales)]), [15, 143, 135, 255]);
   return encodePng(width, height, raster).toString("base64");
 }
 
@@ -718,15 +863,15 @@ function renderPlacementPng(placements) {
   const values = placements.map((placement) => Math.max(0, Number(placement.share) || 0));
   const total = values.reduce((sum, value) => sum + value, 0);
   if (total <= 0) return null;
-  const width = 160;
-  const height = 160;
+  const width = 180;
+  const height = 180;
   const raster = createRaster(width, height, [255, 255, 255, 0]);
   const colors = [
     [98, 87, 217, 255],
-    [15, 159, 149, 255],
-    [213, 80, 89, 255],
-    [191, 123, 32, 255],
-    [135, 144, 164, 255],
+    [15, 143, 135, 255],
+    [201, 71, 82, 255],
+    [169, 103, 22, 255],
+    [125, 134, 153, 255],
   ];
   const cumulative = [];
   values.reduce((sum, value) => {
@@ -736,8 +881,8 @@ function renderPlacementPng(placements) {
   }, 0);
   const centerX = width / 2;
   const centerY = height / 2;
-  const outer = 64;
-  const inner = 38;
+  const outer = 72;
+  const inner = 43;
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const dx = x + 0.5 - centerX;
@@ -766,17 +911,7 @@ function createRaster(width, height, color) {
 
 function drawSeries(raster, width, height, points, color) {
   for (let index = 1; index < points.length; index += 1) {
-    drawLine(
-      raster,
-      width,
-      height,
-      points[index - 1][0],
-      points[index - 1][1],
-      points[index][0],
-      points[index][1],
-      color,
-      3,
-    );
+    drawLine(raster, width, height, points[index - 1][0], points[index - 1][1], points[index][0], points[index][1], color, 3);
   }
   for (const [x, y] of points) drawCircle(raster, width, height, x, y, 3, color);
 }
@@ -901,14 +1036,44 @@ function confidenceLabel(confidence) {
 }
 
 function modeLabel(mode) {
-  return mode === "campaign-drilldown" ? "逐活动下钻" : "组合采样";
+  return ({
+    "evidence-driven": "证据驱动",
+    "campaign-drilldown": "逐活动下钻（兼容模式）",
+    "portfolio-sample": "组合采样（兼容模式）",
+  })[mode];
 }
 
 function modeCoverageLabel(report) {
-  if (report.analysisMode === "campaign-drilldown") {
-    return `${report.coverage.fullyDrilledCampaignIds.length} / ${report.coverage.enabledCampaignCount} 个启用活动已完整下钻`;
+  if (report.analysisMode === "evidence-driven") {
+    const known = (report.coverage.entities || []).filter((item) => item.spendCoverage !== null);
+    const childKnown = known.filter((item) => item.key !== "campaign");
+    const minimum = childKnown.length ? Math.min(...childKnown.map((item) => item.spendCoverage)) : null;
+    const coverage = minimum === null ? "部分实体覆盖度未知" : `核心实体最低花费覆盖 ${formatValue(minimum, "ratio")}`;
+    return `${coverage} · 证据命中 ${report.campaignDrilldowns.length} 个 Campaign`;
   }
-  return `${report.coverage.enabledCampaignCount} 个启用活动 · Top 50 组合采样`;
+  if (report.analysisMode === "campaign-drilldown") {
+    return `${report.coverage.fullyDrilledCampaignIds.length} / ${report.coverage.enabledCampaignCount} 个启用 Campaign 已下钻`;
+  }
+  return `${report.coverage.enabledCampaignCount} 个启用 Campaign · 兼容旧报告`;
+}
+
+function sectionLabel(key, fallback) {
+  return ({
+    campaign: "Campaign",
+    adGroup: "广告组",
+    productAds: "推广商品",
+    keywords: "关键词",
+    targets: "商品投放",
+    searchQuery: "搜索词",
+  })[key] || fallback || key;
+}
+
+function coverageStatusLabel(status) {
+  return ({ complete: "完整分页", "target-reached": "达到目标", unknown: "覆盖度未知" })[status];
+}
+
+function targetLevelLabel(level) {
+  return ({ campaign: "Campaign", adGroup: "广告组" })[level] || level;
 }
 
 function formatDate(value) {

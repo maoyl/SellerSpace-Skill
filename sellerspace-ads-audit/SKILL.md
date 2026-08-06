@@ -38,7 +38,7 @@ node <skill-dir>/scripts/sellerspace-cli.mjs call <operation>
 stdin: <JSON object>
 ```
 
-The local operation name is only a safe dispatcher; the CLI builds the exact backend method, path, query, and body itself. It rejects caller-supplied URLs, HTTP methods, status fields, unknown fields, and page sizes above 50. The output includes the effective request without the API Key and preserves the backend business response while recursively removing credential-like fields.
+The local operation name is only a safe dispatcher; the CLI builds the exact backend method, path, query, and body itself. It rejects caller-supplied URLs, HTTP methods, status fields, unknown fields, and page sizes above the backend maximum of 100. The output includes the effective request without the API Key and preserves the backend business response while recursively removing credential-like fields.
 
 If a direct API call fails with `RATE_LIMITED`, wait for `meta.retryAfterMs` and retry that exact call once. If it still fails, stop the current station audit. For every other API failure, stop immediately. Do not diagnose from already-returned sections and do not render HTML. An empty successful result is valid data, not a failure.
 
@@ -56,26 +56,30 @@ If a direct API call fails with `RATE_LIMITED`, wait for `meta.retryAfterMs` and
 After preflight passes, load [references/diagnosis-rules.md](references/diagnosis-rules.md) and [references/query.md](references/query.md). Use only the exact direct inputs documented there.
 
 1. Query station context with `query_store_performance` for total sales, orders, ad spend, ad-attributed sales, ad ACoS, TACoS, and ROAS. Do not expand into product profit, inventory, shipments, or listing analysis.
-2. Call `query_ads` with `entity=campaign`, cost descending, page 1, size 50. The client always sends `campaignStatus=enabled`; the returned `totalCount` is therefore the enabled campaign count used to select the query mode.
-3. If the enabled campaign count is 0 to 3, use campaign-drilldown mode. For every enabled campaign, query `adGroup`, `productAds`, `keywords`, `targets`, and `searchQuery` separately with `campaignId=<campaignId>`, cost descending, page 1, size 50. The client inserts the full enabled parent/entity chain. Query DAILY history for every enabled campaign and placement history for every SP campaign. Do not also run portfolio-wide child-entity queries. Do not exceed 24 business direct API calls per station in this mode.
-4. If the enabled campaign count is greater than 3, use portfolio-sample mode. Query `adGroup`, `productAds`, `keywords`, `targets`, and `searchQuery` once each, cost descending, page 1, size 50. The client inserts the full enabled parent/entity chain.
-5. In portfolio-sample mode, select at most three campaigns for DAILY history: the strongest high-spend/no-order risk, the strongest inefficient risk, and the strongest efficient-but-budget-limited opportunity. Deduplicate campaign IDs. Query placement history for at most two selected SP campaigns when placement evidence is relevant. Do not exceed 13 business direct API calls per station in this mode.
-6. Do not query `searchTermFrequency`, `negativeKeywords`, or `negativeTargets` unless the user explicitly requests them. Once included, their calls are required and remain fail-closed.
-7. Keep each entity's `sampledCount` and `totalCount`, including every campaign-level child section. “Every enabled campaign was drilled down” means every campaign was queried; it does not mean every child row was inspected when a section contains more than 50 rows.
+2. Query `entity=campaign`, cost descending, page size 100. Fetch every page so every enabled Campaign has basic metrics. The client always sends `campaignStatus=enabled`; never substitute `notArchived`.
+3. Query `adGroup`, `productAds`, `keywords`, `targets`, and `searchQuery` across the station, cost descending, page size 100. For each entity, fetch the first page and continue until the unique fetched rows cover at least 90% of that entity response's positive summary cost or the final page is reached. Calculate coverage as `sum(unique row cost) / summary cost`, capped at 1.
+4. If an entity summary cost is missing, non-finite, or not positive, keep only the first successful maximum-size page, set its spend coverage to `null`, and disclose “覆盖度未知”. If pagination returns no new unique rows or no progress toward cost coverage, stop that entity, preserve the actual coverage, and disclose the limitation.
+5. After the portfolio evidence is complete, select every Campaign implicated by a sufficiently sampled P1/P2 problem, a P3 search-term harvesting opportunity, or a P3 efficient-but-budget-constrained opportunity. Selection is evidence-driven; never cap it by Campaign count, history count, placement count, or total business call count.
+6. For each selected Campaign, query all five child entities with `campaignId=<campaignId>` using the same 90% spend-coverage rule, then query DAILY history. Query placement history for each selected SP Campaign when placement evidence is relevant to its traffic, efficiency, conversion, or budget finding. Deduplicate Campaign IDs.
+7. If the enabled Campaign count is zero, produce an empty enabled-scope report without child, history, or placement calls. Do not query `searchTermFrequency`, `negativeKeywords`, or `negativeTargets` unless the user explicitly requests them. Once planned, every call remains fail-closed.
+8. Keep every section's fetched row count, backend total count, actual spend coverage, and coverage status. Record business call count only as audit information; it is never a validation limit.
 
 ## Diagnose and report
 
 1. Apply [references/diagnosis-rules.md](references/diagnosis-rules.md) exactly. Enforce sample sufficiency before assigning a problem.
 2. Rate traffic, conversion, efficiency, budget, and structure as red, yellow, green, or data-insufficient. Do not invent a numeric score.
-3. Give each finding an entity, evidence, reasoning, P1/P2/P3 priority, confidence, and recommendation direction.
-4. Quote a concrete bid or budget only when SellerSpace returns `suggestedBid` or `suggestedBudget`, and label it as a SellerSpace backend suggestion. Never calculate a concrete change value yourself.
-5. Build the versioned JSON described in [references/report-contract.md](references/report-contract.md) only after every planned direct API call has succeeded. Set `analysisMode=campaign-drilldown` for 0 to 3 enabled campaigns and `analysisMode=portfolio-sample` otherwise.
-6. Render the offline report:
+3. Give each finding an entity, evidence, reasoning, P1/P2/P3 priority, confidence, recommendation direction, and structured `action` from [references/report-contract.md](references/report-contract.md).
+4. For an efficient search term, resolve its positive Campaign/ad-group lists. If it is not already targeted, recommend extracting it as an exact keyword, or as an exact product target when `queryIsAsin=Y`. If it is already targeted, show the resolved locations and do not recommend a duplicate.
+5. For a P1/P2 zero-order search term that is not already negative, recommend it only as a negative candidate. For an existing inefficient keyword or target, recommend lowering the bid first; recommend pausing only when the severe finding is sufficiently sampled. Do not describe an existing keyword or target as a negative search term.
+6. Recommend increasing a Campaign budget when it is sufficiently sampled, efficient, and `costBudgetPercent >= 0.8`. A returned suggested budget or bid is supporting evidence only and never triggers a recommendation by itself.
+7. Give directions such as “建议提高预算”, “建议降低竞价”, “建议暂停”, or “建议加入否定候选”. Do not calculate or recommend a concrete budget, bid, percentage, or placement adjustment. Never say an action was applied.
+8. Build the versioned JSON described in [references/report-contract.md](references/report-contract.md) only after every planned direct API call has succeeded. Set `analysisMode=evidence-driven` and report actual coverage without claiming full coverage when it is unknown or below target.
+9. Render the offline report:
 
 ```text
 node <skill-dir>/scripts/render-ads-audit-report.mjs --output-dir <current-working-directory>/sellerspace-reports
 stdin: <AdsAuditReport JSON>
 ```
 
-7. If local HTML rendering fails, keep the completed chat diagnosis and state that the HTML artifact failed. This is the only failure that permits a text-only result because all direct API data is already complete.
-8. Return a concise Markdown summary with scope, coverage, five ratings, the top three problems, the top three opportunities, limitations, and the absolute report path.
+10. If local HTML rendering fails, keep the completed chat diagnosis and state that the HTML artifact failed. This is the only failure that permits a text-only result because all direct API data is already complete.
+11. Return a concise Markdown summary with scope, coverage, five ratings, the top three problems, the top three opportunities, limitations, and the absolute report path.

@@ -41,7 +41,7 @@ The CLI always sends exact enabled-state filters and rejects caller-supplied sta
 - `productAds`, `keywords`, `targets`: `campaignStatus=enabled`, `adGroupStatus=enabled`, `status=enabled`.
 - `searchQuery`: `campaignStatus=enabled`, `adGroupStatus=enabled` (search terms have no leaf state).
 
-Defaults: `dateType=NM`, `page=1`, `pageSize=50`, `orderByField=cost`, `orderType=2`. Page size cannot exceed 50.
+Defaults: `dateType=NM`, `page=1`, `pageSize=100`, `orderByField=cost`, `orderType=2`. Page size cannot exceed the backend maximum of 100.
 
 ## get_metric_history
 
@@ -54,6 +54,6 @@ Required input: `sellerId`, `marketplace`, `adDataType`, `id`, `fromDateStr`, `t
 ## Audit rules
 
 - Default audit period is `dateType=NM` (rolling 30 days), never `LM`.
-- Core entity detail is page 1, page size 50, cost descending.
-- With 0 to 3 enabled campaigns, drill into every campaign; with more than 3, use portfolio sampling.
+- Fetch every enabled Campaign page. For the other five core entities, paginate cost descending until fetched unique rows cover at least 90% of the positive summary cost or the final page is reached.
+- Select Campaign drilldowns from sufficiently sampled P1/P2/P3 evidence. There is no Campaign, history, placement, or business-call count cap.
 - The Skill never calls write, export, browser, or MCP JSON-RPC operations.

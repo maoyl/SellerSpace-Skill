@@ -453,7 +453,7 @@ function buildAdsRequest(input) {
     campaignId: readOptionalString(input.campaignId, "campaignId", 1, 256),
     adGroupId: readOptionalString(input.adGroupId, "adGroupId", 1, 256),
     page: readInteger(input.page, "page", 1, 10_000, 1),
-    pageSize: readInteger(input.pageSize, "pageSize", 1, 50, 50),
+    pageSize: readInteger(input.pageSize, "pageSize", 1, 100, 100),
     orderByField: readEnum(
       input.orderByField,
       "orderByField",

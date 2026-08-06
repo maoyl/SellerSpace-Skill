@@ -4,7 +4,9 @@
 
 - [Renderer](#renderer)
 - [Input](#input)
-- [Query modes](#query-modes)
+- [Actions](#actions)
+- [Coverage](#coverage)
+- [Analysis modes](#analysis-modes)
 - [Formatting](#formatting)
 - [Output](#output)
 
@@ -20,12 +22,12 @@ Pass one JSON object through stdin. Maximum input is 5 MiB. Never include creden
 
 ## Input
 
-Use `schemaVersion=2`. The shared top-level shape is:
+Use `schemaVersion=2`. New reports use `analysisMode=evidence-driven`; the renderer also accepts the two legacy modes for existing reports.
 
 ```json
 {
   "schemaVersion": 2,
-  "analysisMode": "campaign-drilldown | portfolio-sample",
+  "analysisMode": "evidence-driven",
   "generatedAt": "2026-08-05T12:00:00.000Z",
   "executiveSummary": "一句话总结当前风险、机会与覆盖范围。",
   "scope": {
@@ -68,37 +70,12 @@ Use `schemaVersion=2`. The shared top-level shape is:
       "currency": "USD"
     }
   ],
-  "findings": [
-    {
-      "priority": "P1 | P2 | P3",
-      "kind": "problem | opportunity | observe",
-      "dimension": "traffic | conversion | efficiency | budget | structure",
-      "campaignId": "123",
-      "entityType": "campaign",
-      "entityId": "123",
-      "entityName": "Campaign name",
-      "title": "高花费无订单",
-      "evidence": [
-        {"label": "点击", "value": 42, "format": "count"}
-      ],
-      "reasoning": "判断依据",
-      "recommendation": "建议方向",
-      "confidence": "high | medium | low"
-    }
-  ],
+  "findings": [],
   "sections": [],
   "campaignDrilldowns": [],
-  "coverage": {
-    "operations": ["get_stores", "query_store_performance", "query_ads"],
-    "entitySections": ["campaign", "adGroup", "productAds", "keywords", "targets", "searchQuery"],
-    "historyCampaignIds": ["123"],
-    "placementCampaignIds": ["123"],
-    "enabledCampaignCount": 1,
-    "fullyDrilledCampaignIds": ["123"],
-    "businessCallCount": 10
-  },
+  "coverage": {},
   "assumptions": ["未提供目标 ACoS，使用站点相对基准。"],
-  "limitations": ["单个实体板块明细为按花费排序的 Top 50。"]
+  "limitations": []
 }
 ```
 
@@ -108,7 +85,7 @@ Every `sections` entry uses:
 {
   "key": "campaign",
   "title": "广告活动",
-  "summary": "板块结论",
+  "summary": "启用 Campaign 已完整分页；按花费降序展示。",
   "sampledCount": 3,
   "totalCount": 3,
   "columns": [
@@ -120,6 +97,8 @@ Every `sections` entry uses:
   ]
 }
 ```
+
+`sampledCount` is retained for schema compatibility and must equal `rows.length`; in evidence-driven reports it means fetched unique rows, not a fixed Top-N sample.
 
 Every `campaignDrilldowns` entry uses:
 
@@ -144,16 +123,89 @@ Every `campaignDrilldowns` entry uses:
 }
 ```
 
-`campaignDrilldowns[].sections` contains the five campaign-filtered child sections: `adGroup`, `productAds`, `keywords`, `targets`, and `searchQuery`. A finding from a child entity should include `campaignId` so the report can display it inside the correct campaign dossier.
+`campaignDrilldowns[].sections` contains the five campaign-filtered child sections: `adGroup`, `productAds`, `keywords`, `targets`, and `searchQuery`. A finding from a child entity includes `campaignId` when available.
 
-## Query modes
+## Actions
 
-- `campaign-drilldown`: use when `enabledCampaignCount` is 0 to 3. Top-level `sections` must include `campaign`; `campaignDrilldowns` must contain exactly one entry per enabled campaign; each non-empty entry must contain all five child sections. `fullyDrilledCampaignIds` must match those campaign IDs. Maximum business calls: 24.
-- `portfolio-sample`: use when `enabledCampaignCount` is greater than 3. Top-level `sections` must contain all six core entity sections. `campaignDrilldowns` and `fullyDrilledCampaignIds` must be empty. Maximum business calls: 13.
+Every new finding includes structured `action` so the renderer never classifies recommendations by parsing prose:
 
-“Fully drilled” means every enabled campaign received every planned query. A child section with `totalCount > sampledCount` remains a Top 50 sample and must be disclosed as such.
+```json
+{
+  "priority": "P3",
+  "kind": "opportunity",
+  "dimension": "structure",
+  "campaignId": "123",
+  "entityType": "searchQuery",
+  "entityId": "query-1",
+  "entityName": "wireless socks",
+  "title": "高效搜索词尚未单独投放",
+  "evidence": [
+    {"label": "订单", "value": 5, "format": "count"},
+    {"label": "ACoS", "value": 0.18, "format": "ratio"}
+  ],
+  "reasoning": "样本和效率达到机会门槛，正向投放列表为空。",
+  "recommendation": "建议提取为精准关键词单独投放。",
+  "confidence": "high",
+  "action": {
+    "type": "harvest-search-term | negative-search-term | lower-bid | pause | increase-budget | observe",
+    "label": "建议提取为精准关键词",
+    "targetLevel": "campaign | adGroup | keyword | target | productAd",
+    "coverageStatus": "not-targeted | targeted | already-negative | unknown",
+    "existingTargets": [
+      {"level": "campaign | adGroup", "id": "456", "name": "Resolved name"}
+    ]
+  }
+}
+```
 
-Require all top-level keys except optional `period.from`, `period.to`, nullable baseline values, optional finding `campaignId`/`entityId`, and optional metric currency. Reject unknown schema versions, invalid enums, missing arrays, non-finite numbers, duplicate drilldown campaign IDs, non-enabled campaign drilldowns, more than 6 overview metrics, more than 4 metrics in one campaign drilldown, more than 3 drilldowns, more than 60 trend points, more than 5 placements, or more than 50 rows in any section.
+`action.targetLevel`, `action.coverageStatus`, and `action.existingTargets` are optional. `action` itself is optional only for legacy reports. Recommendation text gives a direction and never contains a calculated bid, budget, percentage, or placement adjustment.
+
+## Coverage
+
+New evidence-driven reports use:
+
+```json
+{
+  "operations": ["get_stores", "query_store_performance", "query_ads"],
+  "entitySections": ["campaign", "adGroup", "productAds", "keywords", "targets", "searchQuery"],
+  "historyCampaignIds": ["123"],
+  "placementCampaignIds": ["123"],
+  "enabledCampaignCount": 26,
+  "fullyDrilledCampaignIds": ["123"],
+  "businessCallCount": 37,
+  "entities": [
+    {
+      "key": "campaign",
+      "queriedCount": 26,
+      "totalCount": 26,
+      "spendCoverage": 1,
+      "status": "complete | target-reached | unknown"
+    }
+  ],
+  "selectedCampaigns": [
+    {
+      "campaignId": "123",
+      "campaignName": "Example Campaign",
+      "reasons": ["P1 高花费无订单"],
+      "historyQueried": true,
+      "placementQueried": true
+    }
+  ]
+}
+```
+
+- `spendCoverage` uses ratio scale and may be `null` only when `status=unknown`.
+- `campaign` must be `complete` and include every enabled Campaign.
+- Each child entity is `target-reached` at 90% or greater, `complete` when all pages were fetched, or `unknown` when positive summary cost is unavailable.
+- `businessCallCount` is informational and has no maximum.
+
+## Analysis modes
+
+- `evidence-driven`: top-level `sections` contains all six core entity sections. `campaignDrilldowns`, `fullyDrilledCampaignIds`, and `selectedCampaigns` describe the same evidence-selected Campaign set. DAILY history is required for every selected Campaign. Placement IDs are a subset of selected SP Campaigns where placement evidence was relevant.
+- `campaign-drilldown`: accepted for legacy reports. Top-level `sections` contains `campaign`; drilldowns may contain any number of enabled Campaigns. No old three-Campaign or 24-call cap is enforced.
+- `portfolio-sample`: accepted for legacy reports. Top-level `sections` contains all six core sections. No old Campaign-count threshold or 13-call cap is enforced.
+
+Require all top-level keys except optional `period.from`, `period.to`, nullable baseline values, optional finding IDs/action, and optional legacy coverage extensions. Reject unknown schema versions, invalid enums, missing arrays, non-finite numbers, duplicate section keys, duplicate drilldown IDs, non-enabled drilldowns, mismatched evidence-driven selection IDs, or invalid coverage ratios. Do not impose a business-call, Campaign, trend, placement, metric, or section-row count limit.
 
 ## Formatting
 
@@ -165,7 +217,14 @@ Require all top-level keys except optional `period.from`, `period.to`, nullable 
 - `string`: escape and display text.
 - `null` or missing display values: show `—`.
 
-Treat every string as untrusted and HTML-escape it. Do not create links from returned business text. The renderer embeds the SellerSpace logo and generated data charts as local data URIs; it must not load any remote dependency.
+Treat every string as untrusted and HTML-escape it. Do not create links from returned business text. The renderer embeds the SellerSpace logo, generated data charts, styles, and interaction code locally; it must not load any remote dependency.
+
+The report uses two independent accessible tab groups:
+
+- Action tabs: 搜索词机会、止损与否定、活动预算、持续观察.
+- Data tabs: Campaign、广告组、推广商品、关键词、商品投放、搜索词.
+
+Each data table shows 25 rows per client-side page without dropping embedded rows. Tabs support click, Left/Right, Home/End, focus state, ARIA relationships, responsive horizontal scrolling, and print expansion of all panels.
 
 ## Output
 
