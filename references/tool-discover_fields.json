@@ -1,0 +1,86 @@
+{
+  "name": "discover_fields",
+  "title": "字段发现",
+  "category": "discovery",
+  "summary": "按业务上下文查字段名、中文含义、单位、比例刻度和可用场景。",
+  "description": "SellerSpace 字段发现。拿不准字段名或字段含义时先用它；字段含义按 domain/entity 上下文区分，例如广告销售额和商品总销售额不是同一字段。",
+  "annotations": {
+    "readOnly": true,
+    "idempotent": true,
+    "destructive": false,
+    "openWorld": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "domain": {
+        "description": "字段域：ads/product/website/stores。",
+        "type": "string",
+        "enum": [
+          "ads",
+          "product",
+          "website",
+          "stores"
+        ]
+      },
+      "entity": {
+        "description": "字段上下文实体，如 campaign、adGroup、product、market、store。",
+        "type": "string"
+      },
+      "query": {
+        "description": "字段关键词或业务含义，如 销售额、广告销售额、转化率、ACoS。",
+        "type": "string"
+      },
+      "usage": {
+        "description": "字段用途：select/include/sort/filter/output。",
+        "type": "string",
+        "enum": [
+          "select",
+          "include",
+          "sort",
+          "filter",
+          "output"
+        ]
+      }
+    }
+  },
+  "responseSummary": "返回匹配字段及其 domain/entity、类型、单位、刻度和 Resource 地址。",
+  "responseShape": {
+    "tool": "discover_fields",
+    "query": "string",
+    "domain": "ads | product | website | stores",
+    "entity": "string",
+    "usage": "select | include | sort | filter | output",
+    "matches": "FieldDefinition[]"
+  },
+  "defaults": [
+    "未限定 domain/entity 时会跨上下文搜索。",
+    "同名业务词可能命中多个口径，应结合 domain/entity 选择。"
+  ],
+  "promptExamples": [
+    {
+      "title": "查广告销售额字段",
+      "prompt": "查一下广告活动里“广告归因销售额”的规范字段名和单位。",
+      "params": {
+        "domain": "ads",
+        "entity": "campaign",
+        "query": "广告归因销售额"
+      }
+    }
+  ],
+  "constraints": [
+    "广告销售额、商品总销售额和站点销售额不是同一口径。"
+  ],
+  "commonErrors": [
+    {
+      "code": "NO_MATCH",
+      "message": "字段关键词无匹配；缩短关键词或移除过窄的 usage 限定。"
+    }
+  ],
+  "relatedTools": [
+    "query_ads",
+    "query_products",
+    "query_store_performance"
+  ],
+  "variants": []
+}

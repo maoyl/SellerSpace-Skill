@@ -1,0 +1,2680 @@
+{
+  "name": "query_store_performance",
+  "title": "店铺与站点表现",
+  "category": "query",
+  "summary": "查询站点或店铺维度的销售、订单、退款、广告与费用汇总。",
+  "description": "SellerSpace 亚马逊店铺/站点总览。店铺数据、站点表现、订单、销售额、利润、利润率、ROI、退款、广告花费、FBA、佣金、ACoS 优先用它；查看数据时优先用表格。",
+  "annotations": {
+    "readOnly": true,
+    "idempotent": true,
+    "destructive": false,
+    "openWorld": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "scope": {
+        "type": "object",
+        "properties": {
+          "stations": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "sellerId-marketplace 列表。"
+          }
+        },
+        "required": [
+          "stations"
+        ]
+      },
+      "period": {
+        "type": "object",
+        "properties": {
+          "preset": {
+            "default": "SD",
+            "description": "时间范围预设代码：TD=今天, YD=昨天, WD=本周（本自然周）, LW=上周（上一自然周）, MO=本月（本自然月）, LM=上月（上一自然月，不是近30天）, SD=近七天（滚动7天）, HD=近十五天（滚动15天）, NM=近三十天（滚动30天，不是上月）, CU=自定义日期范围。严格区分：LM=上月/上一自然月，不是近30天；NM=近三十天/最近30天/过去30天，是滚动30天，不是上月。用户说“近30天”“最近30天”“过去30天”时必须传 NM，只有说“上月”“上个月”“上一自然月”时才传 LM。 若拿不准，优先填写 period.text，让服务端按用户原话规范化。",
+            "type": "string",
+            "enum": [
+              "TD",
+              "YD",
+              "WD",
+              "LW",
+              "MO",
+              "LM",
+              "SD",
+              "HD",
+              "NM",
+              "CU"
+            ]
+          },
+          "text": {
+            "description": "用户原始时间表达。优先填写用户原话，例如“近30天”“最近30天”“上月”“本月”；服务端会自动规范化为 preset，避免把 LM（上月）与 NM（近30天）混淆。",
+            "type": "string"
+          },
+          "from": {
+            "description": "自定义开始日期 yyyy-MM-dd。",
+            "type": "string"
+          },
+          "to": {
+            "description": "自定义结束日期 yyyy-MM-dd。",
+            "type": "string"
+          },
+          "compare": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "default": false,
+                "description": "是否开启对比。",
+                "type": "boolean"
+              },
+              "from": {
+                "description": "对比开始日期 yyyy-MM-dd。",
+                "type": "string"
+              },
+              "to": {
+                "description": "对比结束日期 yyyy-MM-dd。",
+                "type": "string"
+              },
+              "lastYear": {
+                "description": "是否与去年同期对比。",
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "criteria": {
+        "description": "店铺查询控制项，直接透传到后端。",
+        "type": "object",
+        "propertyNames": {
+          "type": "string"
+        },
+        "additionalProperties": {}
+      },
+      "view": {
+        "type": "object",
+        "properties": {
+          "dimension": {
+            "default": "market",
+            "description": "店铺表现维度。",
+            "type": "string",
+            "enum": [
+              "market",
+              "store"
+            ]
+          },
+          "chainType": {
+            "default": "HOURLY",
+            "description": "环比粒度。",
+            "type": "string",
+            "enum": [
+              "HOURLY",
+              "DAILY",
+              "WEEKLY",
+              "MONTHLY"
+            ]
+          }
+        }
+      },
+      "fields": {
+        "description": "额外保留的结果字段。",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "selectFields": {
+        "description": "精确返回字段。用于只取站点/店铺标识或少量指标。",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "includeSummary": {
+        "description": "传 selectFields 时是否仍返回 summary/chainSummary/chainRate；默认 false。",
+        "type": "boolean"
+      },
+      "includeFieldMeta": {
+        "description": "是否返回本次字段的上下文化解释；默认 false。",
+        "type": "boolean"
+      }
+    },
+    "additionalProperties": {}
+  },
+  "responseSchema": {
+    "type": "object",
+    "properties": {
+      "tool": {
+        "type": "string",
+        "const": "query_store_performance"
+      },
+      "request": {
+        "type": "object",
+        "propertyNames": {
+          "type": "string"
+        },
+        "additionalProperties": {}
+      },
+      "data": {
+        "type": "object",
+        "propertyNames": {
+          "type": "string"
+        },
+        "additionalProperties": {}
+      }
+    },
+    "required": [
+      "tool",
+      "request",
+      "data"
+    ],
+    "additionalProperties": false
+  },
+  "responseSummary": "返回 summary 与 salesData，可能包含 chainSummary 和 chainRate。",
+  "responseShape": {
+    "tool": "query_store_performance",
+    "request": "已解析的查询参数",
+    "data": {
+      "success": "boolean",
+      "data": {
+        "summary": "区间汇总",
+        "salesData": "站点/店铺明细与趋势"
+      }
+    }
+  },
+  "defaults": [
+    "period=SD、view.dimension=market、view.chainType=HOURLY。",
+    "selectFields 生效时默认不返回聚合数据，除非 includeSummary=true。",
+    "includeFieldMeta 默认 false。"
+  ],
+  "promptExamples": [
+    {
+      "title": "站点健康检查",
+      "prompt": "检查这些站点近 7 天的销售额、订单、广告花费和 ACoS。",
+      "params": {
+        "scope": {
+          "stations": [
+            "Store-US",
+            "Store-CA"
+          ]
+        },
+        "period": {
+          "preset": "SD"
+        },
+        "selectFields": [
+          "marketplace",
+          "revenue",
+          "orders",
+          "adCost",
+          "adAcos"
+        ],
+        "includeSummary": true
+      }
+    }
+  ],
+  "constraints": [
+    "scope.stations 必须至少包含一个站点。",
+    "变化率字段与原始金额/数量字段的单位不同。"
+  ],
+  "commonErrors": [
+    {
+      "code": "MISSING_SCOPE",
+      "message": "未提供 sellerId、marketplace 或站点集合。"
+    },
+    {
+      "code": "UNKNOWN_FIELD",
+      "message": "字段不属于当前 domain/entity，先用 discover_fields 查询规范字段名。"
+    }
+  ],
+  "relatedTools": [
+    "get_stores",
+    "discover_fields",
+    "query_products"
+  ],
+  "variants": [
+    {
+      "id": "dimension-market",
+      "title": "站点维度",
+      "summary": "按 marketplace 拆分经营表现。",
+      "requestExample": {
+        "scope": {
+          "stations": [
+            "Store-US"
+          ]
+        },
+        "period": {
+          "preset": "SD"
+        },
+        "view": {
+          "dimension": "market",
+          "chainType": "HOURLY"
+        }
+      },
+      "responseShape": {
+        "data": {
+          "summary": "汇总",
+          "salesData": "market rows"
+        }
+      },
+      "fields": [
+        {
+          "name": "sellerId",
+          "labelZh": "sellerId",
+          "description": "website.market 字段 sellerId。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "fieldVal",
+          "labelZh": "fieldVal",
+          "description": "website.market 字段 fieldVal。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "storeShortName",
+          "labelZh": "storeShortName",
+          "description": "website.market 字段 storeShortName。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "marketplace",
+          "labelZh": "marketplace",
+          "description": "website.market 字段 marketplace。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "dataPeriod",
+          "labelZh": "dataPeriod",
+          "description": "website.market 字段 dataPeriod。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "dataPeriodFrom",
+          "labelZh": "dataPeriodFrom",
+          "description": "website.market 字段 dataPeriodFrom。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "dataPeriodTo",
+          "labelZh": "dataPeriodTo",
+          "description": "website.market 字段 dataPeriodTo。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "currency",
+          "labelZh": "currency",
+          "description": "website.market 字段 currency。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "orders",
+          "labelZh": "总订单量",
+          "description": "站点或店铺维度总订单量。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "ordersRate",
+          "labelZh": "总订单量变化率",
+          "description": "总订单量的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "units",
+          "labelZh": "总销量",
+          "description": "站点或店铺维度总销量。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "unitsRate",
+          "labelZh": "总销量变化率",
+          "description": "总销量的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "revenue",
+          "labelZh": "站点/店铺总销售额",
+          "description": "站点或店铺维度的总销售额，不等同于广告归因销售额。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "revenueRate",
+          "labelZh": "站点/店铺总销售额变化率",
+          "description": "站点/店铺总销售额的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "unitsRefund",
+          "labelZh": "unitsRefund",
+          "description": "website.market 字段 unitsRefund。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "unitsRefundRate",
+          "labelZh": "unitsRefund变化率",
+          "description": "unitsRefund的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "cost",
+          "labelZh": "总支出",
+          "description": "站点或店铺维度的总成本/支出字段，具体口径以 SellerSpace 后端为准。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true,
+          "cautions": [
+            "依赖商品成本配置；未配置或配置不完整时，结果可能为空或不准确。"
+          ]
+        },
+        {
+          "name": "costRate",
+          "labelZh": "总支出变化率",
+          "description": "总支出的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "profit",
+          "labelZh": "店铺利润",
+          "description": "站点或店铺维度按 SellerSpace 后端利润口径计算的利润。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true,
+          "cautions": [
+            "依赖商品成本配置；未配置或配置不完整时，结果可能为空或不准确。"
+          ]
+        },
+        {
+          "name": "profitRate",
+          "labelZh": "店铺利润变化率",
+          "description": "店铺利润的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "margin",
+          "labelZh": "店铺利润率",
+          "description": "站点或店铺维度按 SellerSpace 后端利润口径计算的利润率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true,
+          "cautions": [
+            "依赖商品成本配置；未配置或配置不完整时，结果可能为空或不准确。"
+          ]
+        },
+        {
+          "name": "marginRate",
+          "labelZh": "店铺利润率变化率",
+          "description": "店铺利润率的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "roi",
+          "labelZh": "店铺 ROI",
+          "description": "站点或店铺维度按 SellerSpace 后端口径计算的投入产出比。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true,
+          "cautions": [
+            "依赖商品成本配置；未配置或配置不完整时，结果可能为空或不准确。"
+          ]
+        },
+        {
+          "name": "roiRate",
+          "labelZh": "店铺 ROI变化率",
+          "description": "店铺 ROI的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "cpcCost",
+          "labelZh": "广告花费",
+          "description": "站点或店铺维度汇总的广告花费。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "cpcCostRate",
+          "labelZh": "广告花费变化率",
+          "description": "广告花费的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "fbaFee",
+          "labelZh": "fbaFee",
+          "description": "website.market 字段 fbaFee。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "fbaFeeRate",
+          "labelZh": "fbaFee变化率",
+          "description": "fbaFee的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "commissionCost",
+          "labelZh": "commissionCost",
+          "description": "website.market 字段 commissionCost。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "commissionCostRate",
+          "labelZh": "commissionCost变化率",
+          "description": "commissionCost的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcSales",
+          "labelZh": "广告归因销售额",
+          "description": "站点或店铺维度汇总的广告归因销售额。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "adCpcSalesRate",
+          "labelZh": "广告归因销售额变化率",
+          "description": "广告归因销售额的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adImpressions",
+          "labelZh": "adImpressions",
+          "description": "website.market 字段 adImpressions。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adImpressionsRate",
+          "labelZh": "adImpressions变化率",
+          "description": "adImpressions的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adClicks",
+          "labelZh": "adClicks",
+          "description": "website.market 字段 adClicks。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adClicksRate",
+          "labelZh": "adClicks变化率",
+          "description": "adClicks的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcOrders",
+          "labelZh": "adCpcOrders",
+          "description": "website.market 字段 adCpcOrders。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcOrdersRate",
+          "labelZh": "adCpcOrders变化率",
+          "description": "adCpcOrders的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adClickRate",
+          "labelZh": "adClickRate",
+          "description": "website.market 字段 adClickRate。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adClickRateRate",
+          "labelZh": "adClickRate变化率",
+          "description": "adClickRate的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcAvg",
+          "labelZh": "adCpcAvg",
+          "description": "website.market 字段 adCpcAvg。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcAvgRate",
+          "labelZh": "adCpcAvg变化率",
+          "description": "adCpcAvg的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcOrdersCvr",
+          "labelZh": "adCpcOrdersCvr",
+          "description": "website.market 字段 adCpcOrdersCvr。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcOrdersCvrRate",
+          "labelZh": "adCpcOrdersCvr变化率",
+          "description": "adCpcOrdersCvr的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adAcos",
+          "labelZh": "adAcos",
+          "description": "website.market 字段 adAcos。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "adAcosRate",
+          "labelZh": "adAcos变化率",
+          "description": "adAcos的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "acoTs",
+          "labelZh": "acoTs",
+          "description": "website.market 字段 acoTs。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "acoTsRate",
+          "labelZh": "acoTs变化率",
+          "description": "acoTs的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "asoTs",
+          "labelZh": "asoTs",
+          "description": "website.market 字段 asoTs。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "asoTsRate",
+          "labelZh": "asoTs变化率",
+          "description": "asoTs的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "roas",
+          "labelZh": "roas",
+          "description": "website.market 字段 roas。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "roasRate",
+          "labelZh": "roas变化率",
+          "description": "roas的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "sessions",
+          "labelZh": "sessions",
+          "description": "website.market 字段 sessions。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "sessionsRate",
+          "labelZh": "sessions变化率",
+          "description": "sessions的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "sessionsCvr",
+          "labelZh": "sessionsCvr",
+          "description": "website.market 字段 sessionsCvr。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "sessionsCvrRate",
+          "labelZh": "sessionsCvr变化率",
+          "description": "sessionsCvr的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "pageViews",
+          "labelZh": "pageViews",
+          "description": "website.market 字段 pageViews。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "pageViewsRate",
+          "labelZh": "pageViews变化率",
+          "description": "pageViews的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "buyBoxPercentage",
+          "labelZh": "buyBoxPercentage",
+          "description": "website.market 字段 buyBoxPercentage。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "buyBoxPercentageRate",
+          "labelZh": "buyBoxPercentage变化率",
+          "description": "buyBoxPercentage的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "refundRate",
+          "labelZh": "refundRate",
+          "description": "website.market 字段 refundRate。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "refundRateRate",
+          "labelZh": "refundRate变化率",
+          "description": "refundRate的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "natureOrders",
+          "labelZh": "natureOrders",
+          "description": "website.market 字段 natureOrders。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "natureOrdersRate",
+          "labelZh": "natureOrders变化率",
+          "description": "natureOrders的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "natureCvr",
+          "labelZh": "natureCvr",
+          "description": "website.market 字段 natureCvr。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "natureCvrRate",
+          "labelZh": "natureCvr变化率",
+          "description": "natureCvr的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "supplyInstock",
+          "labelZh": "supplyInstock",
+          "description": "website.market 字段 supplyInstock。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "supplyInstockRate",
+          "labelZh": "supplyInstock变化率",
+          "description": "supplyInstock的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "supplyTotal",
+          "labelZh": "supplyTotal",
+          "description": "website.market 字段 supplyTotal。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "supplyTotalRate",
+          "labelZh": "supplyTotal变化率",
+          "description": "supplyTotal的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        }
+      ]
+    },
+    {
+      "id": "dimension-store",
+      "title": "店铺维度",
+      "summary": "按店铺汇总经营表现。",
+      "requestExample": {
+        "scope": {
+          "stations": [
+            "Store-US"
+          ]
+        },
+        "period": {
+          "preset": "SD"
+        },
+        "view": {
+          "dimension": "store",
+          "chainType": "HOURLY"
+        }
+      },
+      "responseShape": {
+        "data": {
+          "summary": "汇总",
+          "salesData": "store rows"
+        }
+      },
+      "fields": [
+        {
+          "name": "sellerId",
+          "labelZh": "sellerId",
+          "description": "website.store 字段 sellerId。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "fieldVal",
+          "labelZh": "fieldVal",
+          "description": "website.store 字段 fieldVal。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "storeShortName",
+          "labelZh": "storeShortName",
+          "description": "website.store 字段 storeShortName。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "marketplace",
+          "labelZh": "marketplace",
+          "description": "website.store 字段 marketplace。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "dataPeriod",
+          "labelZh": "dataPeriod",
+          "description": "website.store 字段 dataPeriod。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "dataPeriodFrom",
+          "labelZh": "dataPeriodFrom",
+          "description": "website.store 字段 dataPeriodFrom。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "dataPeriodTo",
+          "labelZh": "dataPeriodTo",
+          "description": "website.store 字段 dataPeriodTo。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "currency",
+          "labelZh": "currency",
+          "description": "website.store 字段 currency。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "orders",
+          "labelZh": "总订单量",
+          "description": "站点或店铺维度总订单量。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "ordersRate",
+          "labelZh": "总订单量变化率",
+          "description": "总订单量的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "units",
+          "labelZh": "总销量",
+          "description": "站点或店铺维度总销量。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "unitsRate",
+          "labelZh": "总销量变化率",
+          "description": "总销量的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "revenue",
+          "labelZh": "站点/店铺总销售额",
+          "description": "站点或店铺维度的总销售额，不等同于广告归因销售额。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "revenueRate",
+          "labelZh": "站点/店铺总销售额变化率",
+          "description": "站点/店铺总销售额的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "unitsRefund",
+          "labelZh": "unitsRefund",
+          "description": "website.store 字段 unitsRefund。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "unitsRefundRate",
+          "labelZh": "unitsRefund变化率",
+          "description": "unitsRefund的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "cost",
+          "labelZh": "总支出",
+          "description": "站点或店铺维度的总成本/支出字段，具体口径以 SellerSpace 后端为准。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true,
+          "cautions": [
+            "依赖商品成本配置；未配置或配置不完整时，结果可能为空或不准确。"
+          ]
+        },
+        {
+          "name": "costRate",
+          "labelZh": "总支出变化率",
+          "description": "总支出的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "profit",
+          "labelZh": "店铺利润",
+          "description": "站点或店铺维度按 SellerSpace 后端利润口径计算的利润。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true,
+          "cautions": [
+            "依赖商品成本配置；未配置或配置不完整时，结果可能为空或不准确。"
+          ]
+        },
+        {
+          "name": "profitRate",
+          "labelZh": "店铺利润变化率",
+          "description": "店铺利润的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "margin",
+          "labelZh": "店铺利润率",
+          "description": "站点或店铺维度按 SellerSpace 后端利润口径计算的利润率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true,
+          "cautions": [
+            "依赖商品成本配置；未配置或配置不完整时，结果可能为空或不准确。"
+          ]
+        },
+        {
+          "name": "marginRate",
+          "labelZh": "店铺利润率变化率",
+          "description": "店铺利润率的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "roi",
+          "labelZh": "店铺 ROI",
+          "description": "站点或店铺维度按 SellerSpace 后端口径计算的投入产出比。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true,
+          "cautions": [
+            "依赖商品成本配置；未配置或配置不完整时，结果可能为空或不准确。"
+          ]
+        },
+        {
+          "name": "roiRate",
+          "labelZh": "店铺 ROI变化率",
+          "description": "店铺 ROI的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "cpcCost",
+          "labelZh": "广告花费",
+          "description": "站点或店铺维度汇总的广告花费。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "cpcCostRate",
+          "labelZh": "广告花费变化率",
+          "description": "广告花费的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "fbaFee",
+          "labelZh": "fbaFee",
+          "description": "website.store 字段 fbaFee。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "fbaFeeRate",
+          "labelZh": "fbaFee变化率",
+          "description": "fbaFee的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "commissionCost",
+          "labelZh": "commissionCost",
+          "description": "website.store 字段 commissionCost。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "commissionCostRate",
+          "labelZh": "commissionCost变化率",
+          "description": "commissionCost的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcSales",
+          "labelZh": "广告归因销售额",
+          "description": "站点或店铺维度汇总的广告归因销售额。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "adCpcSalesRate",
+          "labelZh": "广告归因销售额变化率",
+          "description": "广告归因销售额的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adImpressions",
+          "labelZh": "adImpressions",
+          "description": "website.store 字段 adImpressions。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adImpressionsRate",
+          "labelZh": "adImpressions变化率",
+          "description": "adImpressions的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adClicks",
+          "labelZh": "adClicks",
+          "description": "website.store 字段 adClicks。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adClicksRate",
+          "labelZh": "adClicks变化率",
+          "description": "adClicks的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcOrders",
+          "labelZh": "adCpcOrders",
+          "description": "website.store 字段 adCpcOrders。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcOrdersRate",
+          "labelZh": "adCpcOrders变化率",
+          "description": "adCpcOrders的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adClickRate",
+          "labelZh": "adClickRate",
+          "description": "website.store 字段 adClickRate。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adClickRateRate",
+          "labelZh": "adClickRate变化率",
+          "description": "adClickRate的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcAvg",
+          "labelZh": "adCpcAvg",
+          "description": "website.store 字段 adCpcAvg。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcAvgRate",
+          "labelZh": "adCpcAvg变化率",
+          "description": "adCpcAvg的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcOrdersCvr",
+          "labelZh": "adCpcOrdersCvr",
+          "description": "website.store 字段 adCpcOrdersCvr。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "currency",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adCpcOrdersCvrRate",
+          "labelZh": "adCpcOrdersCvr变化率",
+          "description": "adCpcOrdersCvr的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "adAcos",
+          "labelZh": "adAcos",
+          "description": "website.store 字段 adAcos。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "adAcosRate",
+          "labelZh": "adAcos变化率",
+          "description": "adAcos的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "acoTs",
+          "labelZh": "acoTs",
+          "description": "website.store 字段 acoTs。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "acoTsRate",
+          "labelZh": "acoTs变化率",
+          "description": "acoTs的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "asoTs",
+          "labelZh": "asoTs",
+          "description": "website.store 字段 asoTs。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "asoTsRate",
+          "labelZh": "asoTs变化率",
+          "description": "asoTs的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "roas",
+          "labelZh": "roas",
+          "description": "website.store 字段 roas。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "roasRate",
+          "labelZh": "roas变化率",
+          "description": "roas的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "sessions",
+          "labelZh": "sessions",
+          "description": "website.store 字段 sessions。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "sessionsRate",
+          "labelZh": "sessions变化率",
+          "description": "sessions的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "sessionsCvr",
+          "labelZh": "sessionsCvr",
+          "description": "website.store 字段 sessionsCvr。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "sessionsCvrRate",
+          "labelZh": "sessionsCvr变化率",
+          "description": "sessionsCvr的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "pageViews",
+          "labelZh": "pageViews",
+          "description": "website.store 字段 pageViews。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "pageViewsRate",
+          "labelZh": "pageViews变化率",
+          "description": "pageViews的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "buyBoxPercentage",
+          "labelZh": "buyBoxPercentage",
+          "description": "website.store 字段 buyBoxPercentage。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "buyBoxPercentageRate",
+          "labelZh": "buyBoxPercentage变化率",
+          "description": "buyBoxPercentage的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "refundRate",
+          "labelZh": "refundRate",
+          "description": "website.store 字段 refundRate。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "refundRateRate",
+          "labelZh": "refundRate变化率",
+          "description": "refundRate的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "natureOrders",
+          "labelZh": "natureOrders",
+          "description": "website.store 字段 natureOrders。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "natureOrdersRate",
+          "labelZh": "natureOrders变化率",
+          "description": "natureOrders的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "natureCvr",
+          "labelZh": "natureCvr",
+          "description": "website.store 字段 natureCvr。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "natureCvrRate",
+          "labelZh": "natureCvr变化率",
+          "description": "natureCvr的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "supplyInstock",
+          "labelZh": "supplyInstock",
+          "description": "website.store 字段 supplyInstock。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "supplyInstockRate",
+          "labelZh": "supplyInstock变化率",
+          "description": "supplyInstock的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "supplyTotal",
+          "labelZh": "supplyTotal",
+          "description": "website.store 字段 supplyTotal。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "supplyTotalRate",
+          "labelZh": "supplyTotal变化率",
+          "description": "supplyTotal的环比/同期变化率。",
+          "category": "metric",
+          "valueType": "number",
+          "unit": "ratio",
+          "valueScale": "ratio_0_to_1",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "filter",
+            "output"
+          ],
+          "defaultVisible": false
+        }
+      ]
+    }
+  ]
+}

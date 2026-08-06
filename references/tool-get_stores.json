@@ -1,0 +1,471 @@
+{
+  "name": "get_stores",
+  "title": "店铺与站点",
+  "category": "discovery",
+  "summary": "发现当前账号可用的 sellerId、marketplace 和授权状态。",
+  "description": "SellerSpace 店铺/站点发现入口。用户提到亚马逊店铺、授权站点、sellerId、marketplace、店铺列表时优先用它；查看列表时优先用表格。marketplace 入参取站点 code（如 US/DE），勿用 marketplaceId。",
+  "annotations": {
+    "readOnly": true,
+    "idempotent": true,
+    "destructive": false,
+    "openWorld": false
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "refresh": {
+        "default": false,
+        "description": "是否跳过缓存。",
+        "type": "boolean"
+      },
+      "keywords": {
+        "description": "按店铺名或卖家 ID 搜索。",
+        "type": "string"
+      },
+      "sellingRegion": {
+        "description": "按大区过滤，如 NA/EU/FE。",
+        "type": "string"
+      },
+      "authAvailable": {
+        "description": "按 SPAPI 授权状态过滤。",
+        "type": "string"
+      },
+      "mwsAvailable": {
+        "description": "按 MWS 授权状态过滤。",
+        "type": "string"
+      },
+      "includeFields": {
+        "description": "额外保留的店铺字段。",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "includeMarketFields": {
+        "description": "额外保留的站点字段。",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "selectFields": {
+        "description": "精确返回店铺字段。敏感字段不会返回。",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "selectMarketFields": {
+        "description": "精确返回站点字段。",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "includeFieldMeta": {
+        "description": "是否返回本次店铺/站点字段的上下文化解释；默认 false。",
+        "type": "boolean"
+      }
+    }
+  },
+  "responseSummary": "返回店铺列表，每个店铺包含授权站点；可按需附带字段元数据。",
+  "responseShape": {
+    "data": [
+      {
+        "sellerId": "number",
+        "storeName": "string",
+        "authMarketDtos": [
+          {
+            "marketplace": "string",
+            "marketActivated": "boolean"
+          }
+        ]
+      }
+    ],
+    "fieldMeta": "仅 includeFieldMeta=true 时返回"
+  },
+  "defaults": [
+    "refresh=false，优先读取最长约 2 小时的店铺缓存。",
+    "未传筛选条件时返回当前账号的全部可见店铺。",
+    "marketplace 使用站点 code（如 US、DE），marketplaceId 默认不返回且不能代替 marketplace。"
+  ],
+  "promptExamples": [
+    {
+      "title": "列出美国站店铺",
+      "prompt": "列出我已授权的美国站店铺，并显示 sellerId、店铺简称和 marketplace。",
+      "params": {
+        "sellingRegion": "NA",
+        "includeMarketFields": [
+          "marketplace"
+        ]
+      }
+    }
+  ],
+  "constraints": [
+    "敏感字段不会通过 selectFields 返回。",
+    "多店铺任务必须先确认范围，再按店铺顺序执行。"
+  ],
+  "commonErrors": [
+    {
+      "code": "NO_AUTHORIZED_STORE",
+      "message": "没有符合筛选条件的授权店铺或站点。"
+    }
+  ],
+  "relatedTools": [
+    "query_ads",
+    "query_products",
+    "query_store_performance"
+  ],
+  "variants": [
+    {
+      "id": "fields-store",
+      "title": "店铺字段",
+      "summary": "店铺标识、名称、授权状态与站点计数。",
+      "fields": [
+        {
+          "name": "sellerId",
+          "labelZh": "sellerId",
+          "description": "stores.store 字段 sellerId。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "merchantId",
+          "labelZh": "merchantId",
+          "description": "stores.store 字段 merchantId。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "storeName",
+          "labelZh": "storeName",
+          "description": "stores.store 字段 storeName。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "storeShortName",
+          "labelZh": "storeShortName",
+          "description": "stores.store 字段 storeShortName。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "sellingRegion",
+          "labelZh": "sellingRegion",
+          "description": "stores.store 字段 sellingRegion。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "authMarkets",
+          "labelZh": "已授权站点",
+          "description": "店铺下已授权站点的数组，每个元素含 marketplace(=code)、timezone 等站点字段。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "authAvailable",
+          "labelZh": "authAvailable",
+          "description": "stores.store 字段 authAvailable。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "mwsAvailable",
+          "labelZh": "mwsAvailable",
+          "description": "stores.store 字段 mwsAvailable。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "adAvailable",
+          "labelZh": "adAvailable",
+          "description": "stores.store 字段 adAvailable。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "activatedMarketCount",
+          "labelZh": "activatedMarketCount",
+          "description": "stores.store 字段 activatedMarketCount。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "activatedADMarketCount",
+          "labelZh": "activatedADMarketCount",
+          "description": "stores.store 字段 activatedADMarketCount。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "mailBound",
+          "labelZh": "mailBound",
+          "description": "stores.store 字段 mailBound。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "mailBoxCount",
+          "labelZh": "mailBoxCount",
+          "description": "stores.store 字段 mailBoxCount。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "count",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        }
+      ]
+    },
+    {
+      "id": "fields-market",
+      "title": "站点字段",
+      "summary": "marketplace、激活状态、时区与路由状态。",
+      "fields": [
+        {
+          "name": "code",
+          "labelZh": "站点代码",
+          "description": "亚马逊站点代码，如 US/DE/JP。下游广告/商品/店铺工具的 marketplace 入参取此值。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "marketplace",
+          "labelZh": "站点(marketplace)",
+          "description": "站点代码（等同 code，如 US/DE），作为下游所有工具的 marketplace 入参。注意：不要使用 marketplaceId。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "marketplaceId",
+          "labelZh": "亚马逊原始市场ID",
+          "description": "亚马逊原始市场标识（如 ATVPDKIKX0DER），仅供展示，不是下游工具的 marketplace 入参。需要 marketplace 时请用 code/marketplace。默认不返回。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": false
+        },
+        {
+          "name": "defaultMarket",
+          "labelZh": "defaultMarket",
+          "description": "stores.market 字段 defaultMarket。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "marketActivated",
+          "labelZh": "marketActivated",
+          "description": "stores.market 字段 marketActivated。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "marketAdActivated",
+          "labelZh": "marketAdActivated",
+          "description": "stores.market 字段 marketAdActivated。",
+          "category": "identity",
+          "valueType": "number",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "timezone",
+          "labelZh": "timezone",
+          "description": "stores.market 字段 timezone。",
+          "category": "identity",
+          "valueType": "date",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        },
+        {
+          "name": "routeStatus",
+          "labelZh": "routeStatus",
+          "description": "stores.market 字段 routeStatus。",
+          "category": "identity",
+          "valueType": "string",
+          "unit": "none",
+          "valueScale": "raw",
+          "allowedIn": [
+            "select",
+            "include",
+            "sort",
+            "output"
+          ],
+          "defaultVisible": true
+        }
+      ]
+    }
+  ]
+}

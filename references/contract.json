@@ -1,0 +1,41 @@
+{
+  "skill": "sellerspace-ads-audit",
+  "skillVersion": "1.0.0",
+  "apiVersion": 1,
+  "minimumSkillVersion": "1.0.0",
+  "minimumNodeVersion": "22.0.0",
+  "accessMode": "read-only",
+  "contractHash": "a43a51a9cbc6fbd26443f9c1c04e306366e4cf37871195960b107bef5f1d90a0",
+  "operations": [
+    {
+      "name": "get_stores",
+      "category": "discovery",
+      "readOnly": true,
+      "destructive": false
+    },
+    {
+      "name": "discover_fields",
+      "category": "discovery",
+      "readOnly": true,
+      "destructive": false
+    },
+    {
+      "name": "query_ads",
+      "category": "query",
+      "readOnly": true,
+      "destructive": false
+    },
+    {
+      "name": "query_store_performance",
+      "category": "query",
+      "readOnly": true,
+      "destructive": false
+    },
+    {
+      "name": "get_metric_history",
+      "category": "query",
+      "readOnly": true,
+      "destructive": false
+    }
+  ]
+}
