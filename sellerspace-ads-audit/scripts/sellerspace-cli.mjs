@@ -7,6 +7,11 @@ import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  compileAuditAnalysis,
+  normalizeTargetAcos,
+  planAuditDrilldowns,
+} from "./sellerspace-audit-engine.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const scriptDir = dirname(scriptPath);
@@ -149,13 +154,20 @@ try {
       credential,
       (apiKey) => callOperation(operation, input, apiKey),
     ));
+  } else if (command === "audit") {
+    const input = await readStdinJson();
+    const credential = await requireCredential();
+    print(await withCredentialRecovery(
+      credential,
+      (apiKey) => runAudit(input, apiKey),
+    ));
   } else if (command === "apply") {
     rejectReadOnlyOperation("apply_change_plan");
     fail("UNSUPPORTED_COMMAND", "当前 Skill 不支持 apply。", 2);
   } else {
     fail(
       "USAGE_ERROR",
-      "可用命令：preflight | doctor | configure | contract | call <operation>",
+      "可用命令：preflight | doctor | configure | contract | call <operation> | audit",
       2,
     );
   }
@@ -350,16 +362,409 @@ async function callOperation(operation, input, apiKey) {
     operation,
     transport: "direct-https",
     request: describeRequest(request),
-    data: normalizeOperationResponse(operation, redactCredentials(response)),
+    data: normalizeOperationResponse(operation, redactCredentials(response), input),
   };
 }
 
-function normalizeOperationResponse(operation, response) {
-  if (operation !== "query_ads") return response;
-  return normalizeAdsResponse(response);
+async function runAudit(rawInput, apiKey) {
+  const input = readAuditInput(rawInput);
+  const period = resolveAuditPeriod(input);
+  const counter = { value: 0 };
+  const call = async (operation, operationInput) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      counter.value += 1;
+      try {
+        return await callOperation(operation, operationInput, apiKey);
+      } catch (error) {
+        const retryAfterMs = error instanceof CliFailure
+          && error.payload?.error?.code === "RATE_LIMITED"
+          ? error.payload?.meta?.retryAfterMs
+          : null;
+        if (
+          attempt === 0
+          && Number.isFinite(retryAfterMs)
+          && retryAfterMs > 0
+          && retryAfterMs <= 60_000
+        ) {
+          await delay(retryAfterMs);
+          continue;
+        }
+        throw error;
+      }
+    }
+  };
+  const commonAdsInput = compactObject({
+    sellerId: input.sellerId,
+    marketplace: input.marketplace,
+    dateType: input.dateType,
+    fromDateStr: input.dateType === "CU" ? input.fromDateStr : undefined,
+    toDateStr: input.dateType === "CU" ? input.toDateStr : undefined,
+    adType: input.adType,
+    pageSize: 100,
+    orderByField: "cost",
+    orderType: 2,
+  });
+  const storePerformanceInput = compactObject({
+    storeShortNameAndMarketplaces: [input.storeShortNameAndMarketplace],
+    dateType: input.dateType,
+    fromDateStr: input.dateType === "CU" ? input.fromDateStr : undefined,
+    toDateStr: input.dateType === "CU" ? input.toDateStr : undefined,
+    chainType: "DAILY",
+    dimension: "market",
+  });
+  const tasks = [
+    async () => ["storePerformance", (await call(
+      "query_store_performance",
+      storePerformanceInput,
+    )).data],
+    ...Object.keys(ADS_ENTITY_CONFIG).map((entity) => async () => [
+      entity,
+      await collectAdsEntity(call, entity, commonAdsInput),
+    ]),
+  ];
+  const initialResults = Object.fromEntries(
+    await mapWithConcurrency(tasks, readAuditConcurrency(), (task) => task()),
+  );
+  const storePerformance = initialResults.storePerformance;
+  const collections = Object.fromEntries(
+    Object.keys(ADS_ENTITY_CONFIG).map((entity) => [entity, initialResults[entity]]),
+  );
+  const drilldowns = planAuditDrilldowns({
+    collections,
+    storePerformance,
+    targetAcos: input.targetAcos,
+  });
+  const historyTasks = drilldowns.campaignHistory.map((campaign) => async () => {
+    const result = await call("get_metric_history", {
+      sellerId: input.sellerId,
+      marketplace: input.marketplace,
+      adDataType: "campaign",
+      id: campaign.id,
+      dimension: "time",
+      timeType: "DAILY",
+      dateType: input.dateType,
+      fromDateStr: period.from,
+      toDateStr: period.to,
+    });
+    return ["history", campaign.id, extractMetricRows(result.data)];
+  });
+  const placementTasks = drilldowns.campaignPlacement.map((campaign) => async () => {
+    const result = await call("get_metric_history", {
+      sellerId: input.sellerId,
+      marketplace: input.marketplace,
+      adDataType: "campaign",
+      id: campaign.id,
+      dimension: "placement",
+      dateType: input.dateType,
+      fromDateStr: period.from,
+      toDateStr: period.to,
+    });
+    return ["placement", campaign.id, extractMetricRows(result.data)];
+  });
+  const drilldownResults = await mapWithConcurrency(
+    [...historyTasks, ...placementTasks],
+    readAuditConcurrency(),
+    (task) => task(),
+  );
+  const campaignHistories = Object.fromEntries(
+    drilldownResults
+      .filter(([kind]) => kind === "history")
+      .map(([, id, rows]) => [id, rows]),
+  );
+  const campaignPlacements = Object.fromEntries(
+    drilldownResults
+      .filter(([kind]) => kind === "placement")
+      .map(([, id, rows]) => [id, rows]),
+  );
+
+  return compileAuditAnalysis({
+    scope: {
+      sellerId: input.sellerId,
+      marketplace: input.marketplace,
+      station: input.storeShortNameAndMarketplace,
+      storeName: input.storeName ?? null,
+    },
+    period,
+    targetAcos: input.targetAcos,
+    storePerformance,
+    collections,
+    campaignHistories,
+    campaignPlacements,
+    drilldownPlan: drilldowns.campaignHistory,
+    businessCallCount: counter.value,
+  });
 }
 
-function normalizeAdsResponse(response) {
+function readAuditInput(input) {
+  assertPlainInput(input);
+  assertAllowedKeys(input, [
+    "sellerId",
+    "marketplace",
+    "storeShortNameAndMarketplace",
+    "storeName",
+    "targetAcos",
+    "dateType",
+    "fromDateStr",
+    "toDateStr",
+    "adType",
+    "timezone",
+  ], "audit");
+  let targetAcos;
+  try {
+    targetAcos = normalizeTargetAcos(input.targetAcos);
+  } catch (error) {
+    fail("INVALID_INPUT", error instanceof Error ? error.message : String(error), 2);
+  }
+  const dateType = readEnum(input.dateType, "dateType", DATE_TYPES, "NM");
+  const fromDateStr = readOptionalDate(input.fromDateStr, "fromDateStr");
+  const toDateStr = readOptionalDate(input.toDateStr, "toDateStr");
+  validateDateWindow(dateType, fromDateStr, toDateStr);
+  const timezone = readOptionalString(input.timezone, "timezone", 1, 128) ?? "UTC";
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: timezone }).format(new Date());
+  } catch {
+    fail("INVALID_INPUT", "timezone 不是有效的 IANA 时区。", 2);
+  }
+  return {
+    sellerId: readPositiveInteger(input.sellerId, "sellerId"),
+    marketplace: readRequiredString(input.marketplace, "marketplace", 2, 16),
+    storeShortNameAndMarketplace: readRequiredString(
+      input.storeShortNameAndMarketplace,
+      "storeShortNameAndMarketplace",
+      3,
+      128,
+    ),
+    storeName: readOptionalString(input.storeName, "storeName", 1, 256),
+    targetAcos,
+    dateType,
+    fromDateStr,
+    toDateStr,
+    adType: readOptionalEnum(input.adType, "adType", new Set(["SP", "SB", "SD"])),
+    timezone,
+  };
+}
+
+async function collectAdsEntity(call, entity, commonInput) {
+  const rows = [];
+  const seen = new Set();
+  let page = 1;
+  let pageCount = 1;
+  let totalCount = 0;
+  let summary = null;
+  let summaryCost = null;
+  let fetchedCost = 0;
+  let previousCost = -1;
+  let status = "unknown";
+
+  do {
+    const result = await call("query_ads", { ...commonInput, entity, page });
+    const data = result.data;
+    if (page === 1) {
+      summary = data.summary;
+      summaryCost = readFiniteNumber(data.summary?.cost);
+    }
+    pageCount = data.page.pageCount;
+    totalCount = data.page.totalCount;
+    let addedRows = 0;
+    for (const row of data.page.items) {
+      const key = auditRowKey(row);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(row);
+      addedRows += 1;
+      const cost = readFiniteNumber(row.cost);
+      if (cost !== null && cost > 0) fetchedCost += cost;
+    }
+
+    const finalPage = data.page.currentPage >= data.page.pageCount;
+    if (entity === "campaign") {
+      if (finalPage) status = "complete";
+    } else if (summaryCost === null || summaryCost <= 0) {
+      status = "unknown";
+      break;
+    } else if (fetchedCost / summaryCost >= 0.9) {
+      status = finalPage ? "complete" : "target-reached";
+      break;
+    } else if (finalPage) {
+      status = "complete";
+      break;
+    } else if (addedRows === 0 || fetchedCost <= previousCost) {
+      status = "partial-no-progress";
+      break;
+    }
+    previousCost = fetchedCost;
+    page = data.page.currentPage + 1;
+  } while (page <= pageCount);
+
+  return {
+    summary,
+    rows,
+    coverage: {
+      fetchedCount: rows.length,
+      totalCount,
+      spendCoverage: summaryCost !== null && summaryCost > 0
+        ? Math.min(1, fetchedCost / summaryCost)
+        : null,
+      status,
+      fetchedPages: page,
+    },
+  };
+}
+
+function auditRowKey(row) {
+  const canonical = row?.canonical ?? {};
+  return canonical.entityId
+    ?? [canonical.campaignId, canonical.adGroupId, canonical.entityName, row?.queryTextId]
+      .map((value) => String(value ?? ""))
+      .join("|");
+}
+
+function extractMetricRows(response) {
+  const payload = response?.data;
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.list)) return payload.list;
+  if (Array.isArray(response?.list)) return response.list;
+  fail("INVALID_RESPONSE", "SellerSpace 指标下钻响应缺少可识别的 list 数组。", 1);
+}
+
+async function mapWithConcurrency(values, concurrency, mapper) {
+  if (values.length === 0) return [];
+  const results = new Array(values.length);
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (nextIndex < values.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await mapper(values[index], index);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+function readAuditConcurrency() {
+  const value = Number(process.env.SELLERSPACE_AUDIT_CONCURRENCY ?? 4);
+  return Number.isInteger(value) && value >= 1 && value <= 8 ? value : 4;
+}
+
+function resolveAuditPeriod(input) {
+  if (input.dateType === "CU") {
+    return {
+      dateType: "CU",
+      from: input.fromDateStr,
+      to: input.toDateStr,
+      label: `${input.fromDateStr} 至 ${input.toDateStr}`,
+      timezone: input.timezone,
+    };
+  }
+  const today = calendarDateInTimeZone(input.timezone);
+  let from = today;
+  let to = today;
+  switch (input.dateType) {
+    case "YD":
+      from = addCalendarDays(today, -1);
+      to = from;
+      break;
+    case "WD":
+      from = startOfIsoWeek(today);
+      break;
+    case "LW": {
+      to = addCalendarDays(startOfIsoWeek(today), -1);
+      from = addCalendarDays(to, -6);
+      break;
+    }
+    case "MO":
+      from = `${today.slice(0, 8)}01`;
+      break;
+    case "LM": {
+      const currentMonth = new Date(`${today.slice(0, 8)}01T00:00:00Z`);
+      const previousMonth = new Date(Date.UTC(
+        currentMonth.getUTCFullYear(),
+        currentMonth.getUTCMonth() - 1,
+        1,
+      ));
+      from = formatCalendarDate(previousMonth);
+      to = formatCalendarDate(new Date(Date.UTC(
+        currentMonth.getUTCFullYear(),
+        currentMonth.getUTCMonth(),
+        0,
+      )));
+      break;
+    }
+    case "SD":
+      from = addCalendarDays(today, -6);
+      break;
+    case "HD":
+      from = addCalendarDays(today, -14);
+      break;
+    case "NM":
+      from = addCalendarDays(today, -29);
+      break;
+    default:
+      break;
+  }
+  const labels = {
+    TD: "今天",
+    YD: "昨天",
+    WD: "本周",
+    LW: "上周",
+    MO: "本月",
+    LM: "上月",
+    SD: "近 7 天",
+    HD: "近 15 天",
+    NM: "近 30 天",
+  };
+  return {
+    dateType: input.dateType,
+    from,
+    to,
+    label: labels[input.dateType] ?? `${from} 至 ${to}`,
+    timezone: input.timezone,
+  };
+}
+
+function calendarDateInTimeZone(timezone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function startOfIsoWeek(value) {
+  const date = new Date(`${value}T00:00:00Z`);
+  const weekday = date.getUTCDay() || 7;
+  return addCalendarDays(value, 1 - weekday);
+}
+
+function addCalendarDays(value, amount) {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + amount);
+  return formatCalendarDate(date);
+}
+
+function formatCalendarDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function readFiniteNumber(value) {
+  if (typeof value === "string" && !value.trim()) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeOperationResponse(operation, response, input) {
+  if (operation !== "query_ads") return response;
+  return normalizeAdsResponse(response, input.entity);
+}
+
+function normalizeAdsResponse(response, entity) {
   if (!response || typeof response !== "object" || Array.isArray(response)) {
     fail("INVALID_RESPONSE", "SellerSpace 广告接口返回的响应信封无效。", 1);
   }
@@ -376,6 +781,7 @@ function normalizeAdsResponse(response) {
       fail("INVALID_RESPONSE", `SellerSpace 广告接口的 data.list.${field} 无效。`, 1);
     }
   }
+  const items = list.items.map((row) => normalizeAdsRow(entity, row));
 
   const envelope = Object.fromEntries(
     Object.entries(response).filter(([key]) => key !== "data"),
@@ -387,8 +793,190 @@ function normalizeAdsResponse(response) {
     ...envelope,
     ...payloadFields,
     summary: payload.summary ?? null,
-    page: { ...list, items: list.items },
+    page: { ...list, items },
   };
+}
+
+function normalizeAdsRow(entity, row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    fail("INVALID_RESPONSE", "SellerSpace 广告接口的 data.list.items 包含无效行。", 1);
+  }
+
+  const campaignId = canonicalString(row.campaignId);
+  const campaignName = canonicalString(row.campaignName);
+  const adGroupId = canonicalString(row.adGroupId);
+  const adGroupName = canonicalString(row.adGroupName);
+  let canonical;
+
+  switch (entity) {
+    case "campaign": {
+      const entityId = campaignId;
+      canonical = {
+        entity,
+        entityId,
+        entityName: campaignName,
+        campaignId,
+        campaignName,
+        adGroupId: null,
+        adGroupName: null,
+        historyAdDataType: "campaign",
+        historyId: entityId,
+      };
+      break;
+    }
+    case "adGroup": {
+      const entityId = canonicalString(row.adGroupId);
+      canonical = {
+        entity,
+        entityId,
+        entityName: adGroupName,
+        campaignId,
+        campaignName,
+        adGroupId,
+        adGroupName,
+        historyAdDataType: "adGroup",
+        historyId: entityId,
+      };
+      break;
+    }
+    case "productAds": {
+      const entityId = canonicalString(row.adId);
+      canonical = {
+        entity,
+        entityId,
+        entityName: firstCanonicalString(row.productTitle, row.asin, row.sellerSku),
+        campaignId,
+        campaignName,
+        adGroupId,
+        adGroupName,
+        asin: canonicalString(row.asin),
+        sellerSku: canonicalString(row.sellerSku),
+        historyAdDataType: "productAd",
+        historyId: entityId,
+      };
+      break;
+    }
+    case "keywords": {
+      const entityId = canonicalString(row.keywordId);
+      const keywordText = firstCanonicalString(row.keywordsText, row.keywordText);
+      const keywordMatchType = firstCanonicalString(
+        row.keywordsMatchType,
+        row.matchType,
+        row.matchTypeStr,
+      );
+      canonical = {
+        entity,
+        entityId,
+        entityName: keywordText,
+        campaignId,
+        campaignName,
+        adGroupId,
+        adGroupName,
+        keywordText,
+        keywordMatchType,
+        historyAdDataType: "keyword",
+        historyId: entityId,
+      };
+      break;
+    }
+    case "targets": {
+      const entityId = canonicalString(row.targetId);
+      const targetExpression = firstCanonicalString(
+        row.targetExpression,
+        row.resolvedExpression,
+        row.targetValue,
+      );
+      const targetType = firstCanonicalString(
+        row.originalTargetType,
+        row.targetType,
+        row.expressionType,
+      );
+      canonical = {
+        entity,
+        entityId,
+        entityName: targetExpression,
+        campaignId,
+        campaignName,
+        adGroupId,
+        adGroupName,
+        targetExpression,
+        targetType,
+        historyAdDataType: "target",
+        historyId: entityId,
+      };
+      break;
+    }
+    case "searchQuery": {
+      const searchTermText = canonicalString(row.query);
+      const keywordId = canonicalString(row.keywordId);
+      const targetId = canonicalString(row.targetId);
+      const historyId = buildSearchTermHistoryId(searchTermText, keywordId, targetId);
+      canonical = {
+        entity,
+        entityId: historyId,
+        entityName: searchTermText,
+        campaignId,
+        campaignName,
+        adGroupId,
+        adGroupName,
+        searchTermText,
+        queryIsAsin: normalizeQueryIsAsin(row, searchTermText),
+        sourceKeywordId: keywordId,
+        sourceKeywordText: firstCanonicalString(row.keywordsText, row.keywordText),
+        sourceKeywordMatchType: firstCanonicalString(
+          row.keywordsMatchType,
+          row.matchType,
+          row.matchTypeStr,
+        ),
+        sourceTargetId: targetId,
+        sourceTargetExpression: firstCanonicalString(
+          row.targetExpression,
+          row.resolvedExpression,
+          row.targetValue,
+        ),
+        historyAdDataType: "searchTerm",
+        historyId,
+      };
+      break;
+    }
+    default:
+      fail("INVALID_RESPONSE", `SellerSpace 广告接口的实体类型 ${String(entity)} 无法映射。`, 1);
+  }
+
+  return { ...row, canonical };
+}
+
+function canonicalString(value) {
+  if (typeof value === "string") return value.trim() ? value : null;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function firstCanonicalString(...values) {
+  for (const value of values) {
+    const normalized = canonicalString(value);
+    if (normalized !== null) return normalized;
+  }
+  return null;
+}
+
+function buildSearchTermHistoryId(searchTermText, keywordId, targetId) {
+  if (searchTermText === null) return null;
+  const separator = "_".repeat(12);
+  return [searchTermText, keywordId ?? "null", targetId ?? "null"].join(separator);
+}
+
+function normalizeQueryIsAsin(row, searchTermText) {
+  if (typeof row.queryIsAsin === "boolean") return row.queryIsAsin ? "Y" : "N";
+  const explicit = canonicalString(row.queryIsAsin)?.toUpperCase();
+  if (explicit === "Y" || explicit === "N") return explicit;
+  const sourceType = firstCanonicalString(
+    row.searchTermType,
+    row.queryType,
+    row.targetType,
+  )?.toLowerCase();
+  if (sourceType === "asin" || sourceType === "product") return "Y";
+  return searchTermText && /^B0[A-Z0-9]{8}$/i.test(searchTermText.trim()) ? "Y" : "N";
 }
 
 function buildOperationRequest(operation, input) {
