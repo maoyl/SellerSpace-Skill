@@ -1,0 +1,4 @@
+interface:
+  display_name: "SellerSpace 亚马逊关键词排名追踪"
+  short_description: "通过 fetch 优先与 Artifact 批量归档亚马逊关键词排名趋势"
+  default_prompt: "使用 $sellerspace-keyword-rank-tracker 检查 SellerSpace MCP、Artifact 交付能力和 v5+ 在线浏览器，再以接口优先的 auto 模式按 ASIN 与关键词文件抓取并保存排名趋势。"
