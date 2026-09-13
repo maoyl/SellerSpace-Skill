@@ -397,7 +397,7 @@ export function renderDashboardHtml({
 <main class="report-shell mx-auto w-full max-w-[1800px]">
   <header class="app-header">
     <div class="brand-lockup">
-      <a href="https://www.sellerspace.com/" target="_blank" rel="noreferrer" aria-label="访问优麦云官网"><img class="brand-logo" src="${SELLERSPACE_LOGO_URL}" alt="优麦云 SellerSpace"></a>
+      <a href="https://www.sellerspace.com/" target="_blank" rel="noreferrer" aria-label="访问优麦云官网"><img class="brand-logo" src="${SELLERSPACE_LOGO_URL}" alt="优麦云"></a>
       <div class="brand-divider" aria-hidden="true"></div>
       <div class="report-name">关键词排名驾驶舱</div>
     </div>
@@ -414,7 +414,7 @@ export function renderDashboardHtml({
       </nav>
     </div>
   </header>
-  <div class="cdn-alert" id="dependencyAlert" role="alert"><i class="ri-wifi-off-line" aria-hidden="true"></i> 图表或样式 CDN 加载失败。数据仍可查看，请联网后刷新以恢复完整图表。</div>
+  <div class="cdn-alert" id="dependencyAlert" role="alert"><i class="ri-wifi-off-line" aria-hidden="true"></i> 图表或样式的外部资源加载失败。数据仍可查看，请联网后刷新以恢复完整图表。</div>
   <div class="dashboard-grid">
     <aside class="sidebar card" aria-label="关键词总览">
       <div class="sidebar-head"><span class="sidebar-title">关键词总览</span><i class="ri-list-check-3" aria-hidden="true"></i></div>

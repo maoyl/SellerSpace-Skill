@@ -101,28 +101,28 @@ export function validatePreflight(preflight) {
   if (preflight.action_id !== ACTION_ID || preflight.action_available !== true) {
     throw new RankTrackerError(
       "ACTION_UNAVAILABLE",
-      `sellerspace-mcp 未提供可用的 ${ACTION_ID} Action`,
+      `sellerspace-mcp 未提供可用的 ${ACTION_ID} 动作`,
     );
   }
   const actionVersion = toInteger(preflight.action_version);
   if (actionVersion === null || actionVersion < MINIMUM_ACTION_VERSION) {
     throw new RankTrackerError(
       "ACTION_VERSION_TOO_OLD",
-      `SellerSpace 浏览器插件的关键词排名 Action 需要 v${MINIMUM_ACTION_VERSION} 或更高版本`,
+      `优麦云浏览器插件的关键词排名动作需要第 ${MINIMUM_ACTION_VERSION} 版或更高版本`,
       { action_version: actionVersion, minimum_version: MINIMUM_ACTION_VERSION },
     );
   }
   if (preflight.browser_online !== true || !nonEmptyString(preflight.browser_id)) {
     throw new RankTrackerError(
       "NO_ONLINE_BROWSER",
-      "没有符合要求的在线 SellerSpace 浏览器插件",
+      "没有符合要求的在线优麦云浏览器插件",
     );
   }
   const artifactSchemaVersion = toInteger(preflight.artifact_schema_version);
   if (preflight.artifact_delivery_available !== true || artifactSchemaVersion !== ARTIFACT_SCHEMA_VERSION) {
     throw new RankTrackerError(
       "ARTIFACT_DELIVERY_UNAVAILABLE",
-      "当前 sellerspace-mcp 或 Browser Hub 不支持所需的 artifact 结果交付模式",
+      "当前 sellerspace-mcp 或浏览器任务中心不支持所需的结果文件交付模式（artifact）",
       { artifact_schema_version: artifactSchemaVersion, required: ARTIFACT_SCHEMA_VERSION },
     );
   }
@@ -274,19 +274,19 @@ export async function recordResult(input, options = {}) {
   const outputDir = requiredAbsolutePath(input?.output_dir, "output_dir", options.cwd);
   const runId = requiredSafeRunId(input?.run_id);
   const manifestPath = path.join(outputDir, "runs", `${runId}.json`);
-  const manifest = await readRequiredJson(manifestPath, "RUN_NOT_FOUND", "找不到指定 run");
+  const manifest = await readRequiredJson(manifestPath, "RUN_NOT_FOUND", "找不到指定的运行记录");
   if (manifest.status !== "running") {
-    throw new RankTrackerError("RUN_FINALIZED", `run ${runId} 已结束，不能继续写入结果`);
+    throw new RankTrackerError("RUN_FINALIZED", `运行 ${runId} 已结束，不能继续写入结果`);
   }
   const keywordIndex = toInteger(input?.keyword_index);
   if (keywordIndex === null || !manifest.keywords?.[keywordIndex]) {
-    throw new RankTrackerError("INVALID_KEYWORD_INDEX", "keyword_index 不属于该 run");
+    throw new RankTrackerError("INVALID_KEYWORD_INDEX", "keyword_index 不属于本次运行");
   }
   const task = input?.task;
   if (!task || !["completed", "failed"].includes(task.status)) {
     throw new RankTrackerError(
       "INVALID_TASK_RESULT",
-      "task.status 必须为 completed 或 failed",
+      "任务状态 task.status 必须为 completed（已完成）或 failed（失败）",
     );
   }
   const attempts = normalizeAttempts(input?.attempts, task);
@@ -379,7 +379,7 @@ export async function finalizeRun(input, options = {}) {
   const outputDir = requiredAbsolutePath(input?.output_dir, "output_dir", options.cwd);
   const runId = requiredSafeRunId(input?.run_id);
   const manifestPath = path.join(outputDir, "runs", `${runId}.json`);
-  const manifest = await readRequiredJson(manifestPath, "RUN_NOT_FOUND", "找不到指定 run");
+  const manifest = await readRequiredJson(manifestPath, "RUN_NOT_FOUND", "找不到指定的运行记录");
 
   if (manifest.finalized_at) {
     const report = await renderReport({ output_dir: outputDir, asin: manifest.input.asin });
@@ -482,7 +482,7 @@ export async function renderReport(input, options = {}) {
   const project = await readRequiredJson(
     projectPath,
     "PROJECT_NOT_FOUND",
-    "输出目录中没有 rank tracker project.json",
+    "输出目录中没有关键词排名追踪项目文件 project.json",
   );
   const asin = normalizeAsin(input?.asin ?? project.asin);
   let rows;
@@ -550,20 +550,20 @@ async function resolveRunConfig(input, cwd) {
   const asin = normalizeAsin(valueFor("asin").value);
   const marketplaceRaw = valueFor("marketplace").value;
   if (!nonEmptyString(marketplaceRaw)) {
-    throw new RankTrackerError("MISSING_MARKETPLACE", "必须明确提供 marketplace");
+    throw new RankTrackerError("MISSING_MARKETPLACE", "必须明确提供站点 marketplace");
   }
   const marketplace = String(marketplaceRaw).trim().toUpperCase();
   const pages = toInteger(valueFor("pages").value);
   if (pages === null || pages < 1 || pages > 10) {
-    throw new RankTrackerError("INVALID_PAGES", "pages 必须明确提供且为 1-10 的整数");
+    throw new RankTrackerError("INVALID_PAGES", "必须明确提供抓取页数 pages，且为 1–10 的整数");
   }
   const keywordSource = valueFor("keywords_file");
   if (!nonEmptyString(keywordSource.value)) {
-    throw new RankTrackerError("MISSING_KEYWORDS_FILE", "必须明确提供 keywords_file");
+    throw new RankTrackerError("MISSING_KEYWORDS_FILE", "必须明确提供关键词文件 keywords_file");
   }
   const outputSource = valueFor("output_dir");
   if (!nonEmptyString(outputSource.value)) {
-    throw new RankTrackerError("MISSING_OUTPUT_DIR", "必须明确提供 output_dir");
+    throw new RankTrackerError("MISSING_OUTPUT_DIR", "必须明确提供输出目录 output_dir");
   }
   const browserSource = valueFor("browser_id");
   return {
@@ -582,13 +582,13 @@ function validateProjectIdentity(project, config) {
   if (project.schema_version !== SCHEMA_VERSION) {
     throw new RankTrackerError(
       "PROJECT_SCHEMA_MISMATCH",
-      `不支持的 project schema_version：${project.schema_version}`,
+      `不支持的项目结构版本 schema_version：${project.schema_version}`,
     );
   }
   if (project.asin !== config.asin || project.marketplace !== config.marketplace) {
     throw new RankTrackerError(
       "PROJECT_IDENTITY_MISMATCH",
-      "output_dir 已属于另一个 ASIN 或 marketplace，拒绝混写历史数据",
+      "输出目录 output_dir 已属于另一个 ASIN 或站点 marketplace，拒绝混写历史数据",
       {
         existing: { asin: project.asin, marketplace: project.marketplace },
         requested: { asin: config.asin, marketplace: config.marketplace },
@@ -626,14 +626,14 @@ function normalizeAttempts(value, task) {
     if (first.status !== "failed" || !["TIMEOUT", "ACTION_FAILED"].includes(first.error?.code)) {
       throw new RankTrackerError(
         "RETRY_NOT_ALLOWED",
-        "只有首次 TIMEOUT 或 ACTION_FAILED 才允许第二次尝试",
+        "只有首次出现超时（TIMEOUT）或动作失败（ACTION_FAILED）才允许第二次尝试",
       );
     }
   }
   if (normalized.at(-1)?.status !== task.status) {
     throw new RankTrackerError(
       "ATTEMPT_STATUS_MISMATCH",
-      "最后一次 attempt 状态必须与 task.status 一致",
+      "最后一次尝试的状态必须与 task.status 一致",
     );
   }
   return normalized;
@@ -670,7 +670,7 @@ async function loadCompletedBrowserResult(task, options) {
   if (task.artifact !== undefined && task.result !== undefined) {
     throw new RankTrackerError(
       "ARTIFACT_RESPONSE_CONFLICT",
-      "completed 任务不能同时携带全量 result 和 Artifact 引用",
+      "已完成任务不能同时携带全量 result 和结果文件引用",
     );
   }
   if (task.artifact !== undefined) {
@@ -679,7 +679,7 @@ async function loadCompletedBrowserResult(task, options) {
   if (task.result !== undefined) {
     return { result: task.result, source_artifact: null };
   }
-  throw new RankTrackerError("INVALID_BROWSER_RESULT", "completed 任务缺少 result 或 Artifact 引用");
+  throw new RankTrackerError("INVALID_BROWSER_RESULT", "已完成任务缺少 result 或结果文件引用");
 }
 
 export async function downloadBrowserArtifact(artifact, options = {}) {
@@ -688,20 +688,20 @@ export async function downloadBrowserArtifact(artifact, options = {}) {
   try {
     url = new URL(reference.downloadUrl);
   } catch {
-    throw new RankTrackerError("ARTIFACT_REFERENCE_INVALID", "Artifact downloadUrl 格式无效");
+    throw new RankTrackerError("ARTIFACT_REFERENCE_INVALID", "结果文件下载地址 downloadUrl 格式无效");
   }
   const localHttp = url.protocol === "http:"
     && ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
   if (url.protocol !== "https:" && !localHttp) {
     throw new RankTrackerError(
       "ARTIFACT_URL_UNSAFE",
-      "Artifact 下载地址必须使用 HTTPS；仅本机测试允许 HTTP loopback",
+      "结果文件下载地址必须使用 HTTPS；仅本机测试允许 HTTP 回环地址",
     );
   }
 
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") {
-    throw new RankTrackerError("ARTIFACT_DOWNLOAD_FAILED", "当前 Node 环境不支持下载 Artifact");
+    throw new RankTrackerError("ARTIFACT_DOWNLOAD_FAILED", "当前 Node.js 环境不支持下载结果文件");
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ARTIFACT_DOWNLOAD_TIMEOUT_MS);
@@ -716,14 +716,14 @@ export async function downloadBrowserArtifact(artifact, options = {}) {
     });
   } catch (error) {
     const reason = error?.name === "AbortError" ? "下载超时" : "网络请求失败";
-    throw new RankTrackerError("ARTIFACT_DOWNLOAD_FAILED", `Artifact ${reason}`);
+    throw new RankTrackerError("ARTIFACT_DOWNLOAD_FAILED", `结果文件${reason}`);
   } finally {
     clearTimeout(timer);
   }
   if (!response.ok) {
     throw new RankTrackerError(
       "ARTIFACT_DOWNLOAD_FAILED",
-      `Artifact 下载失败（HTTP ${response.status}）`,
+      `结果文件下载失败（HTTP ${response.status}）`,
     );
   }
 
@@ -731,7 +731,7 @@ export async function downloadBrowserArtifact(artifact, options = {}) {
   if (reference.uncompressedSizeBytes !== bytes.byteLength) {
     throw new RankTrackerError(
       "ARTIFACT_SIZE_MISMATCH",
-      "Artifact 解压后大小与引用元数据不一致",
+      "结果文件解压后大小与引用元数据不一致",
       { expected: reference.uncompressedSizeBytes, actual: bytes.byteLength },
     );
   }
@@ -739,14 +739,14 @@ export async function downloadBrowserArtifact(artifact, options = {}) {
   if (checksum !== reference.sha256) {
     throw new RankTrackerError(
       "ARTIFACT_CHECKSUM_MISMATCH",
-      "Artifact SHA-256 校验失败",
+      "结果文件 SHA-256 校验失败",
     );
   }
   let result;
   try {
     result = JSON.parse(bytes.toString("utf8"));
   } catch {
-    throw new RankTrackerError("ARTIFACT_INVALID_JSON", "Artifact 内容不是有效 JSON");
+    throw new RankTrackerError("ARTIFACT_INVALID_JSON", "结果文件内容不是有效 JSON");
   }
   return {
     result,
@@ -759,26 +759,26 @@ export async function downloadBrowserArtifact(artifact, options = {}) {
 
 function validateArtifactReference(value) {
   if (!value || typeof value !== "object") {
-    throw new RankTrackerError("ARTIFACT_REFERENCE_INVALID", "缺少有效的 Artifact 引用");
+    throw new RankTrackerError("ARTIFACT_REFERENCE_INVALID", "缺少有效的结果文件引用");
   }
   const schemaVersion = toInteger(value.schemaVersion);
   const uncompressedSizeBytes = toInteger(value.uncompressedSizeBytes);
   if (schemaVersion !== ARTIFACT_SCHEMA_VERSION) {
     throw new RankTrackerError(
       "ARTIFACT_SCHEMA_UNSUPPORTED",
-      `不支持 Artifact schemaVersion=${schemaVersion}`,
+      `不支持的结果文件结构版本 schemaVersion=${schemaVersion}`,
     );
   }
   if (!nonEmptyString(value.id) || !nonEmptyString(value.downloadUrl)) {
-    throw new RankTrackerError("ARTIFACT_REFERENCE_INVALID", "Artifact 引用缺少 id 或 downloadUrl");
+    throw new RankTrackerError("ARTIFACT_REFERENCE_INVALID", "结果文件引用缺少 id 或 downloadUrl");
   }
   if (!/^[0-9a-f]{64}$/i.test(String(value.sha256 ?? ""))) {
-    throw new RankTrackerError("ARTIFACT_REFERENCE_INVALID", "Artifact 引用缺少有效 SHA-256");
+    throw new RankTrackerError("ARTIFACT_REFERENCE_INVALID", "结果文件引用缺少有效 SHA-256");
   }
   if (uncompressedSizeBytes === null || uncompressedSizeBytes < 0 || uncompressedSizeBytes > MAX_ARTIFACT_BYTES) {
     throw new RankTrackerError(
       "ARTIFACT_TOO_LARGE",
-      `Artifact 解压后大小必须在 0-${MAX_ARTIFACT_BYTES} bytes 范围内`,
+      `结果文件解压后大小必须在 0–${MAX_ARTIFACT_BYTES} 字节范围内`,
     );
   }
   return {
@@ -814,7 +814,7 @@ function sanitizeArtifactReference(value) {
 
 async function readResponseBytes(response, maximumBytes) {
   if (!response.body) {
-    throw new RankTrackerError("ARTIFACT_DOWNLOAD_FAILED", "Artifact 响应没有内容");
+    throw new RankTrackerError("ARTIFACT_DOWNLOAD_FAILED", "结果文件响应没有内容");
   }
   const reader = response.body.getReader();
   const chunks = [];
@@ -828,7 +828,7 @@ async function readResponseBytes(response, maximumBytes) {
         await reader.cancel();
         throw new RankTrackerError(
           "ARTIFACT_TOO_LARGE",
-          `Artifact 解压后超过 ${maximumBytes} bytes 限制`,
+          `结果文件解压后超过 ${maximumBytes} 字节限制`,
         );
       }
       chunks.push(Buffer.from(value));
@@ -841,7 +841,7 @@ async function readResponseBytes(response, maximumBytes) {
 
 function normalizeBrowserResult(result, keyword, marketplace) {
   if (!result || typeof result !== "object") {
-    throw new RankTrackerError("INVALID_BROWSER_RESULT", "completed 任务缺少 result 对象");
+    throw new RankTrackerError("INVALID_BROWSER_RESULT", "已完成任务缺少结果对象 result");
   }
   const pages = Array.isArray(result.pages) ? result.pages : [];
   const rows = [];
@@ -1241,7 +1241,7 @@ async function readCliInput() {
   if (process.stdin.isTTY) {
     throw new RankTrackerError(
       "TTY_STDIN_FORBIDDEN",
-      "请通过非 TTY stdin 发送单行紧凑 JSON，避免浏览器结果被终端回显",
+      "请通过非终端标准输入发送单行紧凑 JSON，避免浏览器结果被终端回显",
     );
   }
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -1253,7 +1253,7 @@ async function readCliInput() {
     } catch (error) {
       throw new RankTrackerError(
         "INVALID_STDIN_JSON",
-        "stdin 第一条非空内容必须是单行有效 JSON",
+        "标准输入的第一条非空内容必须是单行有效 JSON",
         { cause: String(error) },
       );
     }

@@ -36,7 +36,7 @@ function readyPreflight(overrides = {}) {
     artifact_delivery_available: true,
     artifact_schema_version: 1,
     checked_at: "2026-08-11T08:00:00.000Z",
-    browser_meta: { name: "Office Mac", browser: "chrome", os: "mac", secret: "drop" },
+    browser_meta: { name: "办公室电脑", browser: "chrome", os: "mac", secret: "drop" },
     ...overrides,
   };
 }
@@ -119,7 +119,7 @@ test("强制预检在任何文件读取或目录创建之前失败", async () =>
   );
 });
 
-test("CLI 从非 TTY 单行 JSON 读取且保持 stdout 纯净", () => {
+test("命令行从非终端标准输入读取单行 JSON，且标准输出不混入其他内容", () => {
   const scriptPath = new URL("./rank-tracker.mjs", import.meta.url);
   const result = spawnSync(process.execPath, [scriptPath.pathname, "prepare-run"], {
     input: "{}\n",
@@ -132,11 +132,11 @@ test("CLI 从非 TTY 单行 JSON 读取且保持 stdout 纯净", () => {
   assert.equal(payload.error.code, "PREFLIGHT_REQUIRED");
 });
 
-test("SKILL 把 MCP、Action、在线浏览器和多设备选择设为不可跳过的前置条件", async () => {
+test("技能将 MCP、浏览器动作、在线浏览器和多设备选择设为不可跳过的前置条件", async () => {
   const skillPath = new URL("../SKILL.md", import.meta.url);
   const skill = await readFile(skillPath, "utf8");
-  const preflightIndex = skill.indexOf("## Start with the mandatory MCP and browser preflight");
-  const prepareIndex = skill.indexOf("## Prepare one run");
+  const preflightIndex = skill.indexOf("## 先完成必需的 MCP 和浏览器预检");
+  const prepareIndex = skill.indexOf("## 准备一次运行");
   assert.ok(preflightIndex >= 0 && prepareIndex > preflightIndex);
   for (const required of [
     "discover_capabilities",
@@ -148,16 +148,16 @@ test("SKILL 把 MCP、Action、在线浏览器和多设备选择设为不可跳�
     "version>=5",
     "taskDelivery.modes",
     "artifactSchemaVersion=1",
-    "When multiple browsers qualify",
-    "Do not create an empty project",
-    "Never fall back",
+    "多个浏览器符合要求时",
+    "不得创建空项目",
+    "禁止回退到",
   ]) {
     assert.match(skill, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });
 
 test("关键词解析处理 BOM、注释、空行和大小写重复，并限制 50 个", async () => {
-  const workspace = await makeWorkspace("\uFEFF# comment\n Yoga Mat \n\nyoga mat\nWIRELESS Charger\nwireless charger\n");
+  const workspace = await makeWorkspace("\uFEFF# 注释\n Yoga Mat \n\nyoga mat\nWIRELESS Charger\nwireless charger\n");
   assert.deepEqual(await parseKeywordsFile(workspace.keywordsFile), ["Yoga Mat", "WIRELESS Charger"]);
 
   const tooMany = Array.from({ length: 51 }, (_, index) => `keyword-${index}`).join("\n");
@@ -199,7 +199,7 @@ test("JSON 配置路径相对配置目录，显式值优先，并校验项目身
   }, { runId: "mismatch-run" }), "PROJECT_IDENTITY_MISMATCH");
 });
 
-test("自然排名与广告位置分开归档，失败记录保留且 finalize 幂等", async () => {
+test("自然排名与广告位置分开归档，保留失败记录且结束操作幂等", async () => {
   const workspace = await makeWorkspace();
   const prepared = await prepareRun(prepareInput(workspace), {
     runId: "ranking-run",
@@ -230,13 +230,13 @@ test("自然排名与广告位置分开归档，失败记录保留且 finalize �
     run_id: prepared.run_id,
     keyword_index: 1,
     attempts: [
-      { job_id: "job-2", status: "failed", error: { code: "TIMEOUT", message: "first" } },
-      { job_id: "job-3", status: "failed", error: { code: "TIMEOUT", message: "second" } },
+      { job_id: "job-2", status: "failed", error: { code: "TIMEOUT", message: "首次请求超时" } },
+      { job_id: "job-3", status: "failed", error: { code: "TIMEOUT", message: "第二次请求超时" } },
     ],
     task: {
       status: "failed",
       jobId: "job-3",
-      error: { code: "TIMEOUT", message: "second" },
+      error: { code: "TIMEOUT", message: "第二次请求超时" },
     },
   });
 
@@ -288,7 +288,7 @@ test("自然排名与广告位置分开归档，失败记录保留且 finalize �
   assert.equal((await readCsv(path.join(workspace.outputDir, "target-rank-history.csv"))).length, 2);
 });
 
-test("Artifact 全量结果由脚本下载校验，签名 URL 不写入运行清单", async () => {
+test("全量结果文件由脚本下载校验，签名网址不写入运行清单", async () => {
   const workspace = await makeWorkspace("artifact keyword\n");
   const prepared = await prepareRun(prepareInput(workspace), {
     runId: "artifact-run",
@@ -351,7 +351,7 @@ test("Artifact 全量结果由脚本下载校验，签名 URL 不写入运行清
   assert.equal(history[0].natural_rank, "6");
 });
 
-test("Artifact 下载安全失败直接记录关键词失败，不重新提交浏览器任务", async () => {
+test("结果文件下载安全检查失败时直接记录关键词失败，不重新提交浏览器任务", async () => {
   const workspace = await makeWorkspace("unsafe artifact\n");
   const prepared = await prepareRun(prepareInput(workspace), { runId: "unsafe-artifact-run" });
   const recorded = await recordResult({
@@ -377,7 +377,7 @@ test("Artifact 下载安全失败直接记录关键词失败，不重新提交�
   assert.equal(manifest.keywords[0].error.code, "ARTIFACT_URL_UNSAFE");
 });
 
-test("not_found、blocked 与未执行任务保持空排名并生成 incomplete run", async () => {
+test("未找到、页面阻断与未执行任务保持空排名，并将运行标记为未完成", async () => {
   const workspace = await makeWorkspace("one\ntwo\nthree\n");
   const prepared = await prepareRun(prepareInput(workspace), {
     runId: "partial-run",
@@ -447,7 +447,7 @@ test("可从全量 ASIN 历史生成竞品报告，并拒绝从未出现的 ASIN
   );
 });
 
-test("缺失页数或浏览器选择不一致时不准备 run，单关键词最多两次尝试", async () => {
+test("缺失页数或浏览器选择不一致时不准备运行，单关键词最多两次尝试", async () => {
   const workspace = await makeWorkspace("one\n");
   await expectCode(
     prepareRun(prepareInput(workspace, { pages: undefined })),
@@ -476,7 +476,7 @@ test("缺失页数或浏览器选择不一致时不准备 run，单关键词最�
     run_id: prepared.run_id,
     keyword_index: 0,
     attempts: [
-      { job_id: "1", status: "failed", error: { code: "BROWSER_OFFLINE", message: "offline" } },
+      { job_id: "1", status: "failed", error: { code: "BROWSER_OFFLINE", message: "浏览器离线" } },
       { job_id: "2", status: "completed" },
     ],
     task: completedTask({ blocked: false, pages: [] }, "2"),
