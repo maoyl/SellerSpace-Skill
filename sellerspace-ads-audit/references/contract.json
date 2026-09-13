@@ -1,18 +1,16 @@
 {
   "skill": "sellerspace-ads-audit",
-  "skillVersion": "1.0.0",
-  "apiVersion": 1,
-  "minimumSkillVersion": "1.0.0",
+  "skillVersion": "2.0.0",
+  "inputSchemaVersion": 1,
   "minimumNodeVersion": "22.0.0",
   "accessMode": "read-only",
-  "transport": "direct-https",
-  "baseUrl": "https://www.sellerspace.com",
-  "authentication": {
-    "type": "api-key",
-    "header": "X-API-Key",
-    "storage": "local-only"
+  "transport": "host-mcp",
+  "dependency": {
+    "required": true,
+    "matching": "capabilities",
+    "missingBehavior": "stop",
+    "description": "由当前宿主按优麦云业务能力识别并调用 MCP，不绑定安装名称或工具前缀。"
   },
-  "responsePolicy": "normalized-ads-page-with-credential-redaction",
   "operations": [
     {
       "name": "get_stores",
@@ -35,70 +33,5 @@
       "destructive": false
     }
   ],
-  "endpoints": [
-    {
-      "operation": "get_stores",
-      "method": "GET",
-      "path": "/api/mcp/analysis/stores"
-    },
-    {
-      "operation": "query_store_performance",
-      "method": "GET",
-      "path": "/api/mcp/analysis/website"
-    },
-    {
-      "operation": "query_ads",
-      "entity": "campaign",
-      "method": "POST",
-      "path": "/api/mcp/analysis/cpc/campaigns/page"
-    },
-    {
-      "operation": "query_ads",
-      "entity": "adGroup",
-      "method": "POST",
-      "path": "/api/mcp/analysis/cpc/adGroups/page"
-    },
-    {
-      "operation": "query_ads",
-      "entity": "productAds",
-      "method": "POST",
-      "path": "/api/mcp/analysis/cpc/product_ads/page"
-    },
-    {
-      "operation": "query_ads",
-      "entity": "keywords",
-      "method": "POST",
-      "path": "/api/mcp/analysis/cpc/keywords/page"
-    },
-    {
-      "operation": "query_ads",
-      "entity": "targets",
-      "method": "POST",
-      "path": "/api/mcp/analysis/cpc/targets/page"
-    },
-    {
-      "operation": "query_ads",
-      "entity": "searchQuery",
-      "method": "POST",
-      "path": "/api/mcp/analysis/cpc/keywords_query/page"
-    },
-    {
-      "operation": "get_metric_history",
-      "entity": "time",
-      "method": "GET",
-      "path": "/api/mcp/analysis/cpc/common/metric/analysis"
-    },
-    {
-      "operation": "get_metric_history",
-      "entity": "placement",
-      "method": "GET",
-      "path": "/api/mcp/analysis/cpc/common/placement"
-    },
-    {
-      "operation": "get_metric_history",
-      "entity": "hourly",
-      "method": "GET",
-      "path": "/api/mcp/analysis/cpc/campaigns/analysis/hourly-stream"
-    }
-  ]
+  "localRuntime": "offline-analysis-only"
 }

@@ -1,6 +1,6 @@
 interface:
   display_name: "优麦云-亚马逊广告体检"
-  short_description: "选择站点与目标 ACoS 后，用确定性规则生成广告优化建议"
-  default_prompt: "使用 $sellerspace-ads-audit 列出可选店铺与 marketplace 站点，让我明确选择一个站点并填写目标 ACoS；随后运行确定性只读审计，在聊天中给出具体建议、原因、风险和适量关键数据。"
+  short_description: "依赖优麦云 MCP，以目标 ACoS 和真实数据生成中文只读广告体检建议"
+  default_prompt: "使用 $sellerspace-ads-audit，先按能力检查当前宿主的优麦云 MCP；匹配店铺站点并确认目标 ACoS 后，通过真实数据在聊天中给出中文广告体检建议、证据与风险。"
 policy:
   allow_implicit_invocation: true

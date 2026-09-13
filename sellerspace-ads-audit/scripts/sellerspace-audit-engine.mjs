@@ -1,5 +1,5 @@
 const ENTITY_LABELS = {
-  campaign: "Campaign",
+  campaign: "广告活动",
   adGroup: "广告组",
   productAds: "推广商品",
   keywords: "关键词",
@@ -10,19 +10,19 @@ const ENTITY_LABELS = {
 const PRIORITY_ORDER = { P1: 0, P2: 1, P3: 2 };
 
 export function normalizeTargetAcos(value) {
-  let parsed;
-  if (typeof value === "string") {
-    const normalized = value.trim();
-    if (!normalized) throw new Error("targetAcos 不能为空。");
-    parsed = normalized.endsWith("%")
-      ? Number(normalized.slice(0, -1)) / 100
-      : Number(normalized);
-  } else {
-    parsed = Number(value);
+  if (typeof value !== "number" && typeof value !== "string") {
+    throw new Error("目标 ACoS 必须是数字或百分比，例如 0.3、30 或 30%。");
   }
-  if (Number.isFinite(parsed) && parsed > 1) parsed /= 100;
+  const text = String(value).trim();
+  const percentInput = text.endsWith("%");
+  const numeric = percentInput ? text.slice(0, -1).trim() : text;
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(numeric)) {
+    throw new Error("targetAcos 格式无效，请填写正数或百分比。");
+  }
+  let parsed = Number(numeric);
+  if (percentInput || parsed > 1) parsed /= 100;
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 10) {
-    throw new Error("targetAcos 必须是正数，例如 0.3、30 或 30%。");
+    throw new Error("targetAcos 必须大于 0 且不超过 1000%。");
   }
   return round(parsed, 6);
 }
@@ -70,6 +70,9 @@ export function planAuditDrilldowns({ collections, storePerformance, targetAcos 
   return {
     campaignHistory,
     campaignPlacement: campaignHistory.filter(({ adType }) => adType === "SP"),
+    productHistory: base.candidates
+      .filter((item) => item.action === "pause" && item.entity.type === "productAds" && item.entity.id)
+      .map((item) => ({ id: item.entity.id, campaignId: item.entity.campaignId, name: item.entity.name })),
   };
 }
 
@@ -81,6 +84,7 @@ export function compileAuditAnalysis({
   collections,
   campaignHistories = {},
   campaignPlacements = {},
+  productHistories = {},
   drilldownPlan = [],
   businessCallCount = 0,
 }) {
@@ -99,8 +103,11 @@ export function compileAuditAnalysis({
   for (const [campaignId, rows] of Object.entries(campaignHistories)) {
     const campaign = campaignById.get(campaignId);
     if (!campaign) continue;
+    const budgetEvidenceKnown = asArray(rows).length > 0 && asArray(rows).every((row) =>
+      row.overBudgetTime !== undefined || finiteOrNull(row.overBudgetTimeMinute) !== null
+      || finiteOrNull(row.campaignBudget) !== null);
     const constrainedDays = countBudgetConstrainedDays(rows);
-    constrainedByCampaign.set(campaignId, constrainedDays);
+    if (budgetEvidenceKnown) constrainedByCampaign.set(campaignId, constrainedDays);
     const metrics = metricsOf(campaign);
     trendEvidence.push({
       campaignId,
@@ -125,7 +132,7 @@ export function compileAuditAnalysis({
         entity: entityOf(campaign),
         title: `${displayName(campaign)}：建议提高预算`,
         reasons: [
-          `近${period?.label ?? "本期"} ACoS ${percent(metrics.acos)}，达到目标 ${percent(target)}。`,
+          `${period?.label ?? "本期"} ACoS ${percent(metrics.acos)}，达到目标 ${percent(target)}。`,
           `${rows.length} 个日数据点中有 ${constrainedDays} 天出现明确预算受限证据。`,
         ],
         evidence: evidenceOf(metrics, target, {
@@ -161,6 +168,22 @@ export function compileAuditAnalysis({
     minClicks,
   });
 
+  base.candidates = base.candidates.filter((item) => {
+    if (item.action !== "pause" || item.entity.type !== "productAds") return true;
+    const history = productHistories[item.entity.id];
+    if (hasPersistentFailure(history, target, minClicks)) {
+      item.evidence.historyDays = history.length;
+      item.evidence.trendEvidence = history.map(compactTrendPoint);
+      return true;
+    }
+    base.observations.push(observation(
+      "product-history-" + item.entity.id,
+      item.entity.name + "：暂停证据不足",
+      "推广商品缺少两个独立日期区间的持续低效证据，未生成暂停建议。",
+      "data-quality",
+    ));
+    return false;
+  });
   const recommendations = finalizeCandidates(base.candidates);
   const observations = finalizeObservations(base.observations);
   const coverage = buildCoverage(collections);
@@ -194,7 +217,7 @@ export function compileAuditAnalysis({
       recommendationCount: recommendations.length,
       drilldownCampaignCount: Object.keys(campaignHistories).length,
       generatedAt: new Date().toISOString(),
-      decisionOwner: "bundled deterministic audit engine",
+      decisionOwner: "本地确定性诊断引擎",
       presentationRowsPerEntity: 5,
     },
   };
@@ -213,6 +236,17 @@ function buildBaseAnalysis(collections, target, account, minClicks) {
   addRelativeSignals(observations, collections, account, minClicks);
   addStructureObservation(candidates, observations, collections);
   addCoverageObservations(observations, collections);
+  for (const entity of Object.keys(ENTITY_LABELS)) {
+    const missing = rowsFor(collections, entity).filter((row) => {
+      const m = metricsOf(row);
+      return [m.cost, m.sales, m.orders, m.clicks].some((value) => value === null);
+    }).length;
+    if (missing) observations.push(observation("missing-metrics-" + entity,
+      ENTITY_LABELS[entity] + "关键指标缺失", missing + " 行存在缺失指标，未知值不会当作零值。", "data-quality"));
+    const unlocatable = rowsFor(collections, entity).filter((row) => !isLocatable(entityOf(row))).length;
+    if (unlocatable) observations.push(observation("missing-identity-" + entity,
+      ENTITY_LABELS[entity] + "定位信息缺失", unlocatable + " 行缺少实体或所属位置标识，不生成操作建议。", "data-quality"));
+  }
 
   return { candidates, observations };
 }
@@ -392,12 +426,23 @@ function addAutomaticAdGroupCandidates(candidates, collections, target, minClick
 function addSearchTermCandidates(candidates, observations, collections, target, minClicks) {
   const negativeGate = Math.max(20, minClicks);
   const summaryCost = metricsOf(collections?.searchQuery?.summary).cost;
+  const winningSourceLocations = new Set(rowsFor(collections, "searchQuery")
+    .filter((row) => {
+      const metrics = metricsOf(row);
+      return row.canonical?.searchTermText && isLocatable(entityOf(row))
+        && metrics.orders >= 3 && metrics.acos !== null && metrics.acos <= target;
+    }).map((row) => [normalizedSearchTerm(row), locationKey(entityOf(row))].join("|")));
   let missingTerms = 0;
   let missingPositiveState = 0;
   let missingNegativeState = 0;
   for (const row of rowsFor(collections, "searchQuery")) {
     const term = row.canonical?.searchTermText;
     const metrics = metricsOf(row);
+    if (term && !["Y", "N"].includes(row.canonical?.queryIsAsin)) {
+      observations.push(observation("search-type-" + row.canonical?.entityId,
+        "搜索词类型缺失", "无法确认文字或 ASIN 类型，未生成提词和否定建议。", "data-quality"));
+      continue;
+    }
     if (!term) {
       if (metrics.cost > 0) missingTerms += 1;
       continue;
@@ -429,7 +474,7 @@ function addSearchTermCandidates(candidates, observations, collections, target, 
           title: `搜索词「${term}」：${product ? "建议单独商品投放" : "建议单独精准投放"}`,
           reasons: [
             `${metrics.orders} 个归因订单，ACoS ${percent(metrics.acos)}，达到目标 ${percent(target)}。`,
-            "返回的正向 Campaign 和广告组列表均未显示该搜索词已被单独投放。",
+            "返回的正向广告活动和广告组列表均未显示该搜索词已被单独投放。",
           ],
           evidence: evidenceOf(metrics, target, {
             queryIsAsin: row.canonical?.queryIsAsin,
@@ -451,6 +496,13 @@ function addSearchTermCandidates(candidates, observations, collections, target, 
       }
     }
 
+    const termLocation = [normalizedSearchTerm(row), locationKey(entityOf(row))].join("|");
+    if (metrics.orders === 0 && metrics.clicks >= negativeGate && winningSourceLocations.has(termLocation)) {
+      observations.push(observation("search-mixed-location-" + termLocation,
+        `搜索词「${term}」在同一广告组表现分化`,
+        "该广告组同时存在达标来源，需先核对来源明细，不生成会覆盖整个广告组的否定建议。", "structure"));
+      continue;
+    }
     if (metrics.orders === 0 && metrics.clicks >= negativeGate && !negativeStateKnown) {
       missingNegativeState += 1;
     } else if (metrics.orders === 0 && metrics.clicks >= negativeGate && !negativeAtSource) {
@@ -466,7 +518,7 @@ function addSearchTermCandidates(candidates, observations, collections, target, 
         title: `搜索词「${term}」：建议在来源广告组否定精准`,
         reasons: [
           `${metrics.clicks} 次点击仍无归因订单，超过否定候选门槛 ${negativeGate} 次点击。`,
-          "来源 Campaign/广告组的否定列表未显示该搜索词已被否定。",
+          "来源 广告活动/广告组的否定列表未显示该搜索词已被否定。",
         ],
         evidence: evidenceOf(metrics, target, {
           costShare: share,
@@ -510,60 +562,65 @@ function addSearchTermCandidates(candidates, observations, collections, target, 
 function addCrossContextCandidates(candidates, collections, target, minClicks) {
   const summaryCost = metricsOf(collections?.searchQuery?.summary).cost;
   const grouped = groupBy(
-    rowsFor(collections, "searchQuery").filter((row) => row.canonical?.searchTermText),
+    rowsFor(collections, "searchQuery").filter((row) => row.canonical?.searchTermText
+      && ["Y", "N"].includes(row.canonical?.queryIsAsin) && isLocatable(entityOf(row))),
     normalizedSearchTerm,
   );
   for (const [normalized, rows] of grouped) {
-    const winner = rows.find((row) => {
+    const winners = rows.filter((row) => {
       const metrics = metricsOf(row);
       return metrics.orders >= 3 && metrics.acos !== null && metrics.acos <= target;
     });
-    const loser = rows.find((row) => {
-      if (winner && locationKey(entityOf(row)) === locationKey(entityOf(winner))) return false;
+    const winner = winners[0];
+    const winningLocations = new Set(winners.map((row) => locationKey(entityOf(row))));
+    const losers = rows.filter((row) => {
+      if (winningLocations.has(locationKey(entityOf(row)))) return false;
       const metrics = metricsOf(row);
       return (metrics.orders >= 2 && metrics.acos !== null && metrics.acos >= target * 1.2)
         || (metrics.orders === 0 && metrics.clicks >= Math.max(20, minClicks));
     });
-    if (!winner || !loser) continue;
-    if (
-      !isIdListValue(loser.negativeCampaignIdList)
-      || !isIdListValue(loser.negativeAdGroupIdList)
-    ) continue;
-    const loserAlreadyNegative = idList(loser.negativeCampaignIdList)
-      .includes(loser.canonical?.campaignId)
-      || idList(loser.negativeAdGroupIdList).includes(loser.canonical?.adGroupId);
-    if (loserAlreadyNegative) continue;
-    const term = winner.canonical.searchTermText;
-    const loserMetrics = metricsOf(loser);
-    const loserShare = summaryCost > 0 ? loserMetrics.cost / summaryCost : null;
-    const severe = (
-      (loserMetrics.orders === 0 && loserMetrics.clicks >= Math.max(20, minClicks))
-      || (loserMetrics.orders >= 2 && loserMetrics.acos !== null && loserMetrics.acos >= target * 1.5)
-    ) && loserShare !== null && loserShare >= 0.05;
-    candidates.push(candidate({
-      action: "isolate-search-term",
-      actionLabel: "建议保留赢家并隔离输家流量",
-      priority: severe ? "P1" : "P2",
-      dimension: "structure",
-      entity: entityOf(loser),
-      title: `搜索词「${term}」：建议按投放位置拆分处理`,
-      reasons: [
-        `在「${locationLabel(winner)}」中 ACoS ${percent(metricsOf(winner).acos)}，达到目标。`,
-        `在「${locationLabel(loser)}」中 ${loserReason(metricsOf(loser), target)}。`,
-      ],
-      evidence: {
-        targetAcos: target,
-        loserCostShare: loserShare,
-        comparisonEvidence: {
-          winner: previewRow(winner),
-          loser: previewRow(loser),
+    if (!winner) continue;
+    for (const loser of losers) {
+      if (
+        !isIdListValue(loser.negativeCampaignIdList)
+        || !isIdListValue(loser.negativeAdGroupIdList)
+      ) continue;
+      const loserAlreadyNegative = idList(loser.negativeCampaignIdList)
+        .includes(loser.canonical?.campaignId)
+        || idList(loser.negativeAdGroupIdList).includes(loser.canonical?.adGroupId);
+      if (loserAlreadyNegative) continue;
+      const term = winner.canonical.searchTermText;
+      const loserMetrics = metricsOf(loser);
+      const loserShare = summaryCost > 0 ? loserMetrics.cost / summaryCost : null;
+      const severe = (
+        (loserMetrics.orders === 0 && loserMetrics.clicks >= Math.max(20, minClicks))
+        || (loserMetrics.orders >= 2 && loserMetrics.acos !== null && loserMetrics.acos >= target * 1.5)
+      ) && loserShare !== null && loserShare >= 0.05;
+      candidates.push(candidate({
+        action: "isolate-search-term",
+        actionLabel: "建议保留赢家并隔离输家流量",
+        priority: severe ? "P1" : "P2",
+        dimension: "structure",
+        entity: entityOf(loser),
+        title: `搜索词「${term}」：建议按投放位置拆分处理`,
+        reasons: [
+          `在「${locationLabel(winner)}」中 ACoS ${percent(metricsOf(winner).acos)}，达到目标。`,
+          `在「${locationLabel(loser)}」中 ${loserReason(metricsOf(loser), target)}。`,
+        ],
+        evidence: {
+          targetAcos: target,
+          loserCostShare: loserShare,
+          comparisonEvidence: {
+            winner: previewRow(winner),
+            loser: previewRow(loser),
+          },
         },
-      },
-      risk: "只在输家来源的最小安全范围隔离，不能在仍包含赢家流量的 Campaign 层级全局否定。",
-      confidence: coverageConfidence(collections?.searchQuery),
-      materialCost: metricsOf(loser).cost,
-      normalizedObject: normalized,
-    }));
+        risk: "只在输家来源的最小安全范围隔离，不能在仍包含赢家流量的广告活动层级全局否定。",
+        confidence: coverageConfidence(collections?.searchQuery),
+        materialCost: metricsOf(loser).cost,
+        normalizedObject: normalized,
+      }));
+    }
   }
 }
 
@@ -607,32 +664,32 @@ function addRelativeSignals(observations, collections, account, minClicks) {
 
 function addStructureObservation(candidates, observations, collections) {
   const campaigns = rowsFor(collections, "campaign");
-  const zeroSpend = campaigns.filter((row) => metricsOf(row).cost <= 0);
+  const zeroSpend = campaigns.filter((row) => metricsOf(row).cost === 0);
   if (zeroSpend.length === 0) return;
   observations.push(observation(
     "enabled-zero-spend-campaigns",
-    `${zeroSpend.length} 个启用 Campaign 本期零花费`,
+    `${zeroSpend.length} 个启用广告活动本期零花费`,
     "这可能来自新建、无流量、投放资格或历史测试结构；在没有创建日期和投放资格证据前不直接建议暂停。",
     "structure",
   ));
   if (zeroSpend.length >= 3 && zeroSpend.length / Math.max(1, campaigns.length) >= 0.5) {
     candidates.push(candidate({
       action: "review-structure",
-      actionLabel: "建议整理零花费 Campaign 结构",
+      actionLabel: "建议整理零花费广告活动结构",
       priority: "P3",
       dimension: "structure",
       entity: {
         type: "account",
         id: null,
-        name: "启用 Campaign 结构",
+        name: "启用广告活动结构",
         campaignId: null,
         campaignName: null,
         adGroupId: null,
         adGroupName: null,
       },
-      title: "启用 Campaign：建议检查零花费结构",
+      title: "启用 广告活动：建议检查零花费结构",
       reasons: [
-        `${campaigns.length} 个启用 Campaign 中有 ${zeroSpend.length} 个本期零花费，占 ${percent(zeroSpend.length / campaigns.length)}。`,
+        `${campaigns.length} 个启用广告活动中有 ${zeroSpend.length} 个本期零花费，占 ${percent(zeroSpend.length / campaigns.length)}。`,
       ],
       evidence: {
         enabledCampaigns: campaigns.length,
@@ -679,38 +736,43 @@ function addPlacementCandidates({ candidates, campaignPlacements, campaignById, 
       const metrics = metricsOf(row);
       return metrics.orders >= 2 && metrics.acos !== null && metrics.acos <= target;
     });
-    const loser = rows.find((row) => {
+    const losers = rows.filter((row) => {
       const metrics = metricsOf(row);
       return metrics.orders >= 2 && metrics.acos !== null && metrics.acos >= target * 1.2;
     });
-    if (!winner || !loser || winner.placement === loser.placement) continue;
-    const metrics = metricsOf(loser);
-    const placementCost = rows.reduce((sum, row) => sum + metricsOf(row).cost, 0);
-    const share = placementCost > 0 ? metrics.cost / placementCost : null;
-    candidates.push(candidate({
-      action: "lower-placement-bid",
-      actionLabel: "建议降低该广告位加价方向",
-      priority: metrics.acos >= target * 1.5 && share !== null && share >= 0.05 ? "P1" : "P2",
-      dimension: "efficiency",
-      entity: {
-        ...entityOf(campaign),
-        placement: canonicalText(loser.placement),
-      },
-      title: `${displayName(campaign)} 的${placementLabel(loser.placement)}：建议降低加价方向`,
-      reasons: [
-        `${placementLabel(loser.placement)} ACoS ${percent(metrics.acos)}，高于目标 ${percent(target)}。`,
-        `${placementLabel(winner.placement)} ACoS ${percent(metricsOf(winner).acos)} 已达到目标，广告位表现存在明确分化。`,
-      ],
-      evidence: {
-        targetAcos: target,
-        costShare: share,
-        loser: previewMetricRow(loser),
-        winner: previewMetricRow(winner),
-      },
-      risk: "调整广告位会改变流量分布；如果各广告位都低效，应先修正投放和商品问题。",
-      confidence: "high",
-      materialCost: metrics.cost,
-    }));
+    if (!winner) continue;
+    for (const loser of losers) {
+      if (winner.placement === loser.placement
+        || !["placementTop", "placementDetail", "placementOther", "placementBusiness"].includes(loser.placement)
+        || !(finiteOrNull(campaign[loser.placement]) > 0)) continue;
+      const metrics = metricsOf(loser);
+      const placementCost = rows.reduce((sum, row) => sum + metricsOf(row).cost, 0);
+      const share = placementCost > 0 ? metrics.cost / placementCost : null;
+      candidates.push(candidate({
+        action: "lower-placement-bid",
+        actionLabel: "建议降低该广告位加价方向",
+        priority: metrics.acos >= target * 1.5 && share !== null && share >= 0.05 ? "P1" : "P2",
+        dimension: "efficiency",
+        entity: {
+          ...entityOf(campaign),
+          placement: canonicalText(loser.placement),
+        },
+        title: `${displayName(campaign)} 的${placementLabel(loser.placement)}：建议降低加价方向`,
+        reasons: [
+          `${placementLabel(loser.placement)} ACoS ${percent(metrics.acos)}，高于目标 ${percent(target)}。`,
+          `${placementLabel(winner.placement)} ACoS ${percent(metricsOf(winner).acos)} 已达到目标，广告位表现存在明确分化。`,
+        ],
+        evidence: {
+          targetAcos: target,
+          costShare: share,
+          loser: previewMetricRow(loser),
+          winner: previewMetricRow(winner),
+        },
+        risk: "调整广告位会改变流量分布；如果各广告位都低效，应先修正投放和商品问题。",
+        confidence: "high",
+        materialCost: metrics.cost,
+      }));
+    }
   }
 }
 
@@ -745,7 +807,8 @@ function addIncreaseBidCandidates({ candidates, collections, constrainedByCampai
     if (!source || emitted.has(sourceId) || existingLower.has(sourceId)) continue;
     const sourceMetrics = metricsOf(source);
     if (sourceMetrics.orders < 3 || sourceMetrics.acos === null || sourceMetrics.acos > target) continue;
-    if ((constrainedByCampaign.get(source.canonical?.campaignId) ?? 0) >= 2) continue;
+    if (!constrainedByCampaign.has(source.canonical?.campaignId)
+      || constrainedByCampaign.get(source.canonical?.campaignId) > 0) continue;
     emitted.add(sourceId);
     candidates.push(candidate({
       action: "increase-bid",
@@ -763,7 +826,7 @@ function addIncreaseBidCandidates({ candidates, collections, constrainedByCampai
         searchTermImpressionShare: impressionShare,
         searchTermImpressionRank: impressionRank,
       }),
-      risk: "提高竞价可能推高 CPC；若 Campaign 后续出现预算受限，应优先处理预算而不是继续抬价。",
+      risk: "提高竞价可能推高 CPC；若广告活动后续出现预算受限，应优先处理预算而不是继续抬价。",
       confidence: coverageConfidence(
         source.canonical?.entity === "keywords" ? collections?.keywords : collections?.targets,
       ),
@@ -783,8 +846,7 @@ function addCampaignFallbackCandidates({
   const childCoverageSufficient = ["productAds", "keywords", "targets", "searchQuery"]
     .every((entity) => {
       const coverage = collections?.[entity]?.coverage;
-      return coverage?.status === "complete"
-        || (Number.isFinite(coverage?.spendCoverage) && coverage.spendCoverage >= 0.9);
+      return coverage?.status === "complete";
     });
   if (!childCoverageSufficient) return;
   const campaignSummaryCost = metricsOf(collections?.campaign?.summary).cost;
@@ -814,13 +876,18 @@ function addCampaignFallbackCandidates({
       return childMetrics.orders >= 3 && childMetrics.acos !== null && childMetrics.acos <= target;
     });
     if (hasWinner) continue;
+    const knownChildren = childRows.filter((row) => row.canonical?.campaignId === campaignId);
+    if (knownChildren.length === 0 || knownChildren.some((row) => {
+      const m = metricsOf(row);
+      return m.orders === null || m.cost === null || m.clicks === null || (m.orders > 0 && m.acos === null);
+    })) continue;
     const history = campaignHistories[campaignId] ?? [];
     const severeDays = history.filter((row) => {
       const day = metricsOf(row);
       return (day.orders >= 1 && day.acos !== null && day.acos >= target * 1.5)
         || (day.orders === 0 && day.clicks > 0);
     }).length;
-    if (history.length > 0 && severeDays < 2) continue;
+    if (!hasPersistentFailure(history, target, minClicks)) continue;
     candidates.push(candidate({
       action: "reduce-budget",
       actionLabel: "建议降低预算并排查投放结构",
@@ -831,10 +898,9 @@ function addCampaignFallbackCandidates({
       reasons: [
         metrics.orders === 0
           ? `${metrics.clicks} 次点击仍无归因订单。`
-          : `Campaign ACoS ${percent(metrics.acos)}，达到目标 ${percent(target)} 的 ${multiple(metrics.acos / target)}。`,
-        history.length > 0
-          ? `${history.length} 个日数据点中有 ${severeDays} 天持续出现严重低效。`
-          : "已分析的子实体中没有达到目标的明确赢家，也没有更小粒度的安全操作对象。",
+          : `广告活动 ACoS ${percent(metrics.acos)}，达到目标 ${percent(target)} 的 ${multiple(metrics.acos / target)}。`,
+        `${history.length} 个日数据点的前后两个区间均达到持续低效门槛。`,
+        "完整查询的子实体中没有达到目标的明确赢家，也没有更小粒度的安全操作对象。",
       ],
       evidence: evidenceOf(metrics, target, {
         costShare: share,
@@ -842,18 +908,20 @@ function addCampaignFallbackCandidates({
         severeDays,
       }),
       risk: "预算调整不能替代关键词、搜索词或商品问题修复；若数据覆盖不足，应先补齐子实体证据。",
-      confidence: history.length > 0 ? "high" : "medium",
+      confidence: "high",
       materialCost: metrics.cost,
     }));
   }
 }
 
 function finalizeCandidates(candidates) {
+  const locatable = candidates.filter((item) => isLocatable(item.entity));
   const isolationTerms = new Set(
-    candidates.filter((item) => item.action === "isolate-search-term").map((item) => item.normalizedObject),
+    locatable.filter((item) => item.action === "isolate-search-term")
+      .map((item) => [item.normalizedObject, locationKey(item.entity)].join("|")),
   );
-  const filtered = candidates.filter((item) => !(
-    isolationTerms.has(item.normalizedObject)
+  const filtered = locatable.filter((item) => !(
+    isolationTerms.has([item.normalizedObject, locationKey(item.entity)].join("|"))
     && ["harvest-search-term", "negative-search-term"].includes(item.action)
   ));
   const byKey = new Map();
@@ -876,6 +944,11 @@ function finalizeCandidates(candidates) {
       id: `action-${String(index + 1).padStart(3, "0")}`,
       ...item,
     }));
+}
+
+function isLocatable(entity) {
+  return entity.type === "account" || Boolean(entity.id && entity.campaignId
+    && (entity.type === "campaign" || entity.adGroupId));
 }
 
 function compareCandidates(left, right) {
@@ -943,11 +1016,11 @@ function buildRatings({ recommendations, observations, coverage, account, target
   const ratingFor = (dimension) => {
     const actions = recommendations.filter((item) => item.dimension === dimension);
     if (actions.some((item) => item.priority === "P1")) return "red";
-    if (actions.some((item) => item.priority === "P2" || item.priority === "P3")) return "yellow";
+    if (actions.some((item) => item.priority === "P2")) return "yellow";
     if (observations.some((item) => item.dimension === dimension)) return "yellow";
     const incomplete = requiredCoverage[dimension]
-      .some((entity) => coverage[entity]?.status === "unknown");
-    if (incomplete) return "data-insufficient";
+      .some((entity) => !["complete", "target-reached"].includes(coverage[entity]?.status));
+    if (incomplete || observations.some((item) => item.dimension === "data-quality")) return "data-insufficient";
     return "green";
   };
   return {
@@ -966,22 +1039,18 @@ function buildRatings({ recommendations, observations, coverage, account, target
 }
 
 function normalizeAccount(storePerformance, fallbackSummary) {
-  const objects = collectObjects(storePerformance);
-  let best = fallbackSummary && typeof fallbackSummary === "object" ? fallbackSummary : {};
-  let bestScore = metricObjectScore(best);
-  for (const object of objects) {
-    const score = metricObjectScore(object);
-    if (score > bestScore) {
-      best = object;
-      bestScore = score;
-    }
-  }
-  const cost = firstFinite(best.cpcCost, best.adSpend, best.cost, fallbackSummary?.cost);
-  const sales = firstFinite(best.adCpcSales, best.cpcSales, best.adSales, fallbackSummary?.cpcSales);
-  const clicks = firstFinite(best.adClicks, best.clicks, fallbackSummary?.clicks);
-  const orders = firstFinite(best.adCpcOrders, best.cpcOrder, best.adOrders, fallbackSummary?.cpcOrder);
-  const impressions = firstFinite(best.adImpressions, best.impressions, fallbackSummary?.impressions);
+  const payload = storePerformance?.data ?? storePerformance ?? {};
+  const best = payload.summary ?? payload;
+  const fromStation = ["cpcCost", "adSpend", "adCpcSales", "adCpcOrders", "adClicks", "adCpcOrdersCvr", "adAcos", "cost", "cpcSales"]
+    .some((key) => finiteOrNull(best[key]) !== null);
+  const ad = fromStation ? best : (fallbackSummary ?? {});
+  const cost = firstFinite(ad.cpcCost, ad.adSpend, ad.cost);
+  const sales = firstFinite(ad.adCpcSales, ad.cpcSales, ad.adSales);
+  const clicks = firstFinite(ad.adClicks, ad.clicks);
+  const orders = firstFinite(ad.adCpcOrders, ad.cpcOrder, ad.adOrders);
+  const impressions = firstFinite(ad.adImpressions, ad.impressions);
   return {
+    advertisingScope: fromStation ? "station-all-ads" : "enabled-campaigns",
     currency: canonicalText(best.currencyCode ?? best.currency),
     revenue: firstFinite(best.revenue, best.sales),
     orders: firstFinite(best.orders, best.productOrders),
@@ -990,31 +1059,15 @@ function normalizeAccount(storePerformance, fallbackSummary) {
     adOrders: orders,
     impressions,
     clicks,
-    ctr: ratioOrDerived(firstFinite(best.adClickRate, best.ctr), clicks, impressions),
-    cvr: ratioOrDerived(firstFinite(best.adCpcOrdersCvr, best.cvr), orders, clicks),
-    cpc: ratioOrDerived(firstFinite(best.cpc), cost, clicks),
-    acos: ratioOrDerived(firstFinite(best.adAcos, best.acos), cost, sales),
-    roas: ratioOrDerived(firstFinite(best.roas), sales, cost),
+    ctr: ratioOrDerived(firstFinite(ad.adClickRate, ad.ctr), clicks, impressions),
+    cvr: ratioOrDerived(firstFinite(ad.adCpcOrdersCvr, ad.cvr), orders, clicks),
+    cpc: ratioOrDerived(firstFinite(ad.cpc), cost, clicks),
+    acos: ratioOrDerived(firstFinite(ad.adAcos, ad.acos), cost, sales),
+    roas: ratioOrDerived(firstFinite(ad.roas), sales, cost),
     tacos: firstFinite(best.acoTs, best.tacos),
     profit: firstFinite(best.profit),
     margin: firstFinite(best.margin),
   };
-}
-
-function collectObjects(value, depth = 0, output = []) {
-  if (depth > 8 || value === null || typeof value !== "object") return output;
-  if (Array.isArray(value)) {
-    for (const item of value) collectObjects(item, depth + 1, output);
-    return output;
-  }
-  output.push(value);
-  for (const item of Object.values(value)) collectObjects(item, depth + 1, output);
-  return output;
-}
-
-function metricObjectScore(value) {
-  const keys = ["cpcCost", "adCpcSales", "adAcos", "adClicks", "cpcSales", "cost", "clicks"];
-  return keys.reduce((score, key) => score + (finiteOrNull(value?.[key]) !== null ? 1 : 0), 0);
 }
 
 function computeMinClicks(accountCvr) {
@@ -1023,18 +1076,18 @@ function computeMinClicks(accountCvr) {
 }
 
 function metricsOf(row) {
-  const cost = firstFinite(row?.cost, row?.cpcCost) ?? 0;
-  const sales = firstFinite(row?.cpcSales, row?.adCpcSales) ?? 0;
-  const orders = firstFinite(row?.cpcOrder, row?.adCpcOrders, row?.adOrders) ?? 0;
-  const clicks = firstFinite(row?.clicks, row?.adClicks) ?? 0;
-  const impressions = firstFinite(row?.impressions, row?.adImpressions) ?? 0;
+  const cost = firstFinite(row?.cost, row?.cpcCost);
+  const sales = firstFinite(row?.cpcSales, row?.adCpcSales);
+  const orders = firstFinite(row?.cpcOrder, row?.adCpcOrders, row?.adOrders);
+  const clicks = firstFinite(row?.clicks, row?.adClicks);
+  const impressions = firstFinite(row?.impressions, row?.adImpressions);
   return {
     cost,
     sales,
     orders,
     clicks,
     impressions,
-    acos: ratioOrDerived(firstFinite(row?.acos, row?.adAcos), cost, sales),
+    acos: sales > 0 ? ratioOrDerived(firstFinite(row?.acos, row?.adAcos), cost, sales) : null,
     roas: ratioOrDerived(firstFinite(row?.roas), sales, cost),
     cvr: ratioOrDerived(firstFinite(row?.cvr, row?.adCpcOrdersCvr), orders, clicks),
     ctr: ratioOrDerived(firstFinite(row?.ctr, row?.adClickRate), clicks, impressions),
@@ -1115,20 +1168,32 @@ function compactTrendPoint(row) {
   };
 }
 
+function hasPersistentFailure(rows, target, minClicks) {
+  if (!Array.isArray(rows) || rows.length < 2) return false;
+  const ordered = [...rows].filter((row) => typeof row.datePoint === "string")
+    .sort((a, b) => a.datePoint.localeCompare(b.datePoint));
+  if (ordered.length < 2 || new Set(ordered.map((row) => row.datePoint)).size !== ordered.length) return false;
+  const midpoint = Math.floor(ordered.length / 2);
+  return [ordered.slice(0, midpoint), ordered.slice(midpoint)].every((bucket) => {
+    const metrics = bucket.map(metricsOf);
+    if (metrics.some((m) => [m.cost, m.sales, m.orders, m.clicks].some((v) => v === null))) return false;
+    const total = metrics.reduce((sum, m) => ({
+      cost: sum.cost + m.cost, sales: sum.sales + m.sales,
+      orders: sum.orders + m.orders, clicks: sum.clicks + m.clicks,
+    }), { cost: 0, sales: 0, orders: 0, clicks: 0 });
+    return (total.orders === 0 && total.clicks >= minClicks)
+      || (total.orders >= 2 && total.sales > 0 && total.cost / total.sales >= target * 1.5);
+  });
+}
+
 function countBudgetConstrainedDays(rows) {
   return asArray(rows).filter(isBudgetConstrainedDay).length;
 }
 
 function isBudgetConstrainedDay(row) {
   const explicit = row?.overBudgetTime;
-  if (
-    explicit !== null
-    && explicit !== undefined
-    && explicit !== ""
-    && explicit !== 0
-    && explicit !== "0"
-    && explicit !== false
-  ) return true;
+  if (explicit === true || (typeof explicit === "number" && explicit > 0)
+    || (typeof explicit === "string" && /^(?:\d{1,2}:\d{2}(?::\d{2})?|true)$/i.test(explicit))) return true;
   const minutes = finiteOrNull(row?.overBudgetTimeMinute);
   if (minutes !== null && minutes > 0) return true;
   const budget = finiteOrNull(row?.campaignBudget);
@@ -1216,7 +1281,7 @@ function idList(value) {
     const parsed = JSON.parse(value);
     if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
   } catch {
-    // Fall through to comma-separated values.
+    // 兼容逗号分隔的标识列表。
   }
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
@@ -1248,6 +1313,7 @@ function firstFinite(...values) {
 }
 
 function finiteOrNull(value) {
+  if (typeof value !== "number" && typeof value !== "string") return null;
   if (typeof value === "string" && !value.trim()) return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;

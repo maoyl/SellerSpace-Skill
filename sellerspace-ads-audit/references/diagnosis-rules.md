@@ -1,146 +1,50 @@
-# SellerSpace 广告体检诊断规则
+# 广告体检诊断规则
 
-## Contents
+此文档解释 `sellerspace-audit-engine.mjs` 的实际规则，不另行定义一套由助手自由执行的诊断流程。取数与分页见 [查询契约](query.md)，动作边界见 [建议规则](recommendation-playbook.md)。
 
-- [Query plan](#query-plan)
-- [Business targets and relative context](#business-targets-and-relative-context)
-- [Priorities](#priorities)
-- [Ratings](#ratings)
-- [Recommendations](#recommendations)
+## 目标与数据口径
 
-## Query plan
+- 用户目标 ACoS 是唯一达标线；站点均值、历史均值和接口建议值只作上下文。
+- `30%`、`30`、`0.30` 均归一为 `0.30`；`150%` 为 `1.50`，不能再次除以 100。没有单位的数值大于 1 时按百分数解释。
+- `null/undefined/空字符串/布尔值` 不是零。缺失的订单、销售额或点击不能补零后触发操作。
+- ACoS 判断需正销售额与至少 2 个归因订单；扩量需至少 3 个归因订单。指标已知且分母有效时，以分子/分母计算比率，避免混用不同刻度。
+- 当前账户汇总只读取经营响应的明确 `summary`，不从明细、日数据或环比对象中挑选。仅在整组站点广告指标不可用时，才整体使用启用活动汇总；禁止混用两种范围的分子分母，并披露 `advertisingScope`。
+- ACoS、CTR、CVR 和花费覆盖使用比例刻度；`searchTermImpressionShare` 和广告位加价使用百分数刻度。
 
-The bundled `sellerspace-audit-engine.mjs` is the executable implementation of these rules. The normal Skill workflow invokes it through `sellerspace-cli.mjs audit`; agents must not reimplement this plan through a long sequence of manual calls. This reference explains decisions and supports review when a user questions a recommendation.
+## 样本门槛与优先级
 
-After preflight, call `get_stores` only to list valid store + marketplace combinations. Require the user to explicitly select exactly one returned combination and provide its target ACoS before any performance, ads, history, or placement query. A station already named exactly in the request counts as selected; otherwise show the returned options and stop for confirmation. Never auto-select the first, last-used, partially matched, or sole returned station.
+`minClicks = clamp(ceil(2 / max(accountCVR, 0.02)), 10, 50)`。账户 CVR 缺失或为零时使用 20。
 
-Use `dateType=NM` when the user omits a period. Keep one explicitly selected `sellerId + marketplace` per audit.
+- 点击率观察：至少 1,000 次曝光。
+- 无订单或转化不足：至少 `minClicks` 次点击。
+- 新增否定候选：至少 `max(20, minClicks)` 次点击，且明确为零订单。
+- P1：无订单且点击达门槛，或至少 2 个订单且 ACoS ≥ 目标的 1.5 倍；同时花费占对应实体汇总至少 5%。
+- P2：至少 2 个订单且 ACoS ≥ 目标的 1.2 倍，或无订单且点击达门槛，但未达到 P1。
+- P3：满足明确商业目标的提词、扩量或有证据的结构整理机会。
 
-Query station context with `query_store_performance`. Read station identity plus `orders`, `units`, `revenue`, `cpcCost`, `adCpcSales`, `adAcos`, `acoTs`, and `roas` from the unprojected backend response when present.
+花费汇总不为正数时，不计算花费占比优先级。CTR/CVR 低于账户水平 70% 仅作为观察，不单独触发降竞价、暂停或降预算。建议值、排名和展示份额也不能独立触发动作。
 
-For every `query_ads` call, use `orderByField=cost`, `orderType=2`, and `pageSize=100`. The direct client normalizes the actual backend envelope without changing business values: read aggregate metrics from `data.summary`, rows from `data.page.items`, and pagination from `data.page.totalCount`, `data.page.currentPage`, and `data.page.pageCount`. Treat any other row path as invalid instead of guessing.
+## 持续性与覆盖要求
 
-Use each row's CLI-owned `canonical` object for identity and text. The exact mappings are:
+- 推广商品暂停候选必须查询该商品广告自身日趋势。将按日期排序且无重复的历史分为两个不重叠区间；两个区间分别达到零订单点击门槛，或分别有至少 2 单且 ACoS ≥ 目标的 1.5 倍，才证明持续低效。
+- 活动降预算同样要求上述持续性证据，且四类相关子实体（推广商品、关键词、投放、搜索词）已完整分页；不能把全站 90% 花费覆盖当作单个活动的完整证据。
+- 缺少历史、关键指标或更小粒度证据时，不生成需要这些证据的动作。
+- 当前预算不能代替逐日历史预算。提高预算至少需要两个不同日期的直接预算受限证据。
+- 查询失败终止体检；成功返回但缺字段可标注数据不足。不得把缺失当作没有风险。
 
-- Keyword: `canonical.keywordText` comes from raw `keywordsText` (legacy fallback `keywordText`); `canonical.keywordMatchType` comes from `keywordsMatchType` (fallback `matchType`, then `matchTypeStr`).
-- Search term: `canonical.searchTermText` comes only from raw `query`. `canonical.sourceKeywordText` is the originating keyword and is not the search term. `canonical.queryIsAsin` is the normalized `Y/N` classification.
-- Target: `canonical.targetExpression` and `canonical.targetType`; promoted product: `canonical.asin` and `canonical.sellerSku`.
-- Entity/history identity: use `canonical.entityId`, `canonical.historyAdDataType`, and `canonical.historyId`. A null canonical ID cannot be guessed and cannot trigger a history request or an ID-dependent action.
+## 五个健康维度
 
-All raw SellerSpace fields remain on the row for metric evidence. Never use a raw alias to override a non-null canonical value.
+流量、转化、效率、预算、结构分别显示红、黄、绿或数据不足，不给总分：
 
-The audit scope is enabled inventory only. The direct client owns these exact backend status filters, rejects caller overrides, and never uses `notArchived`:
+- 有该维度 P1：红。
+- 没有 P1，有 P2 或实际观察信号：黄。
+- 数据完整且没有问题证据：绿。
+- 查询覆盖或关键指标不足：数据不足。
+- P3 是机会，本身不使健康维度变黄。
+- 效率额外对比账户 ACoS 与用户目标：达到目标 1.5 倍为红，超过目标为黄；账户 ACoS 缺失则为数据不足。
 
-- `campaign`: `campaignStatus=enabled`.
-- `adGroup`: `campaignStatus=enabled` and `adGroupStatus=enabled`.
-- `productAds`, `keywords`, and `targets`: `campaignStatus=enabled`, `adGroupStatus=enabled`, and `status=enabled`.
-- `searchQuery`: `campaignStatus=enabled` and `adGroupStatus=enabled`; search terms have no leaf status.
+结构集中、零花费和低样本本身不证明投放无效。无启用活动时，未查的子维度为不适用，不包装成“广告健康”。
 
-Use the corresponding metric and evidence fields when present: campaign budget/placement fields; ad group default bid; product metrics; keyword metrics; target metrics; and search-query positive/negative lists plus impression rank/share. Identity and labels still come only from `canonical`.
+## 结果
 
-Use one `evidence-driven` query mode after the enabled Campaign query succeeds:
-
-1. Fetch every Campaign page so all enabled Campaigns have basic metrics.
-2. Query the five child entities across the station. Start at page 1 and continue until fetched unique rows cover at least 90% of the entity summary cost or the final page is reached.
-3. Compute `spendCoverage = min(1, sum(unique fetched row cost) / summary cost)`. Deduplicate with `canonical.entityId`; when it is null, use `canonical.campaignId + canonical.adGroupId + canonical.entityName` only for coverage deduplication. Such a fallback key does not authorize history queries or ID-dependent actions.
-4. When summary cost is missing, non-finite, or not positive, keep the first maximum-size page, set `spendCoverage=null` and `coverageStatus=unknown`, and do not claim complete evidence.
-5. Stop pagination when a page adds no unique rows or no positive covered cost. Preserve the actual coverage and disclose that the 90% target was not reached.
-6. Build the cross-context indexes defined in [recommendation-playbook.md](recommendation-playbook.md), then select each Campaign connected to a sufficiently sampled P1/P2 problem, an entity bid/pause candidate, a cross-context split, a P3 search-term harvesting/isolation opportunity, or a P3 efficient-but-budget-constrained opportunity. Do not rank down to a fixed number.
-7. Reuse the station-level child rows for Campaign/ad-group joins instead of repeating the same five child queries per Campaign. Because the rows are already sorted by spend and satisfy the recorded coverage policy, this removes duplicate network calls without changing the analyzed evidence set.
-8. Query DAILY history for every selected Campaign. Query Campaign placement history for each selected SP Campaign so a placement action can be emitted only when placement rows show a qualified winner/loser split. Do not guess IDs or treat Campaign history as leaf-entity history. A leaf action that requires persistence must remain a lower-risk direction unless direct leaf evidence exists.
-
-If the enabled Campaign count is zero, produce an empty enabled-scope report without child, history, or placement calls. Business call count is informational and has no maximum.
-
-`costBudgetPercent`, ACoS, CTR, and CVR use ratio scale (`0.3 = 30%`). Placement adjustments and `searchTermImpressionShare` use percent scale (`30 = 30%`). Do not mix these scales. `costBudgetPercent` is today's budget consumption ratio even when the performance period is 30 days.
-
-Keep the returned total count, fetched unique row count, spend coverage, and coverage status for every entity. Campaign coverage is complete only after every Campaign page succeeds. Child coverage is `target-reached` at 90% or greater, `complete` when the final page succeeds, and `unknown` when a positive summary cost is unavailable.
-
-## Business targets and relative context
-
-Every new audit requires a user-supplied target ACoS before `query_store_performance`, `query_ads`, or `get_metric_history`. `preflight` and `get_stores` may run first only to authenticate and present valid station choices. Target ROAS, break-even lines, account averages, Campaign summaries, Amazon suggestions, and historical ACoS do not satisfy this requirement and must not be converted into a target by the agent. If target ACoS is missing, ask the user and stop.
-
-The explicit target ACoS is the only threshold that can prove efficiency is acceptable, mark efficiency or budget green, or trigger an expansion action. Campaign summaries and station/account metrics are relative context only: use them to find outliers, never as a pass line and never as evidence that an entity is profitable or “good”. Renderer support for reports without a target exists only for old saved artifacts; never intentionally create a new no-target audit.
-
-Normalize a user ACoS written as `30%` or `30` to `0.30`; preserve a ratio already written as `0.30`. Do not normalize ROAS as a percentage.
-
-Compute the conversion sample threshold as:
-
-```text
-minClicks = clamp(ceil(2 / max(accountCVR, 0.02)), 10, 50)
-```
-
-Use `minClicks=20` if account CVR is missing or zero.
-
-Apply these sample gates:
-
-- CTR: at least 1,000 impressions.
-- ACoS: at least 2 ad-attributed orders and positive ad-attributed sales.
-- Conversion or zero-order waste: clicks at least `minClicks`.
-- Rows below the gate may be listed as a data note but never as a primary action or severe problem.
-
-## Priorities
-
-Assign P1 when either condition holds:
-
-- Zero orders, clicks at least `minClicks`, and row cost is at least 5% of the corresponding entity summary cost.
-- A target exists, orders are at least 2, ACoS is at least 1.5 times target, and cost share is at least 5%.
-
-Assign P2 when any condition holds and no P1 condition holds:
-
-- A target exists, orders are at least 2, and ACoS is at least 1.2 times target.
-- Zero orders and clicks are at least `minClicks`, but the row does not meet the P1 material-spend condition. This can trigger a leaf bid-control direction; a new negative search term still requires at least `max(20, minClicks)` clicks.
-- Impressions are at least 1,000, CTR is below 70% of account CTR, and cost share is at least 2%.
-- Clicks are at least `minClicks`, CVR is below 70% of account CVR, and cost share is at least 2%.
-
-Relative CTR/CVR P2 rules are drilldown signals only. They do not independently justify lowering a bid, pausing an entity, reducing a budget, or placing a generic “持续观察” card in the primary action rail. Final actions must pass [recommendation-playbook.md](recommendation-playbook.md).
-
-Assign P3 opportunity when any condition holds:
-
-- Orders are at least 3 and ACoS is at or below an explicit user target.
-- A Campaign meets the explicit user target and has repeated, directly reported daily budget-constraint evidence.
-- A sufficiently sampled search term is not present in the current Campaign or ad-group positive ID lists and meets the explicit target ACoS.
-- A P1/P2 zero-order search term is not present in the applicable negative ID lists; describe it only as a negative candidate.
-
-A returned `suggestedBudget` or `suggestedBid` is supporting evidence only. It never creates P3 or an action by itself.
-
-When calculating cost share, require a positive summary cost. If it is unavailable, do not assign a spend-share-based priority.
-
-## Ratings
-
-Rate these five dimensions:
-
-- Traffic: impressions, clicks, CTR, search-term impression share.
-- Conversion: orders, CVR, CPA, sufficiently sampled clicks without orders.
-- Efficiency: spend, ad-attributed sales, ACoS, ROAS.
-- Budget: daily budget, today's budget consumption, suggested budget, and inefficient-spend concentration.
-- Structure: distribution across campaigns/ad groups/keywords/targets and search-term positive/negative coverage.
-
-For each dimension:
-
-- Red: at least one P1 finding belongs to the dimension.
-- Yellow: no P1, but at least one P2 finding belongs to the dimension.
-- Green: no P1/P2, the required data is complete, and any efficiency/budget judgment has an explicit business target.
-- Data-insufficient: the required summary or section data is missing. For legacy saved reports without a user target, efficiency and budget remain data-insufficient unless negative evidence makes them yellow or red; a new audit must already have a target ACoS.
-
-Never create a numeric total score. Concentration alone is evidence, not a problem, unless the concentrated entity is also inefficient or risky.
-
-## Recommendations
-
-Every deterministic recommendation must contain the entity type, entity name and ID when available, Campaign/ad-group location when applicable, evidence, sample size, priority, confidence, recommendation direction, structured `action`, and at least one `reasons` entry that explains why the direction is recommended. Include additional reasons only when they add distinct, evidence-backed support; never invent or split reasons merely to increase the count. Add `risk` whenever coverage, target, inventory, promotion, or daily evidence limits the conclusion. Apply [recommendation-playbook.md](recommendation-playbook.md) before emitting an action.
-
-Use these action rules:
-
-- `harvest-search-term`: read the term from `canonical.searchTermText`, resolve `positiveCampaignIdList` and `positiveAdGroupIdList`, and require efficiency within the explicit target ACoS. If neither list shows the term as targeted, recommend an exact keyword when `canonical.queryIsAsin` is not `Y`, or an exact product target when it is `Y`. If it is already targeted, list the resolved Campaign/ad-group locations and use `observe` instead of recommending a duplicate.
-- `negative-search-term`: require a P1/P2 zero-order search term with at least `max(20, minClicks)` clicks and confirm that the applicable negative Campaign/ad-group lists do not already contain it. Recommend negative exact at the narrowest safe source scope; use negative phrase only for a repeated irrelevant phrase that does not occur in any converting query. Do not claim it was negated.
-- `isolate-search-term`: require cross-context evidence with at least one qualified winner and one qualified loser. Name the exact destination and the losing source. Never use a Campaign-wide negative when the term still performs well in another ad group within that Campaign.
-- `increase-bid`: require an explicit business target, sufficient orders, efficiency within target, no Campaign budget constraint, and visibility headroom. Apply only to a controllable keyword, target, or automatic ad-group/default bid.
-- `lower-bid`: use for an existing inefficient keyword or target with sufficient P1/P2 evidence. A keyword or target has a bid, not a budget.
-- `pause`: use only for severe persistent failure. Pause a Campaign or ad group only when no material child winner exists; otherwise act at the leaf level.
-- `increase-budget`: require an explicit user ACoS/ROAS or break-even target, sufficient Campaign efficiency against that target, and DAILY evidence with at least two actual budget-constrained days. Count a constrained day only when the daily API reports `overBudgetTime`, a positive `overBudgetTimeMinute`, or an applicable historical `campaignBudget`; current `dailyBudget` alone is only “按当前预算回看” and cannot prove historical shortage. Recommend “提高预算” without an amount. Never use `costBudgetPercent`, current daily budget, or a suggested budget as the sole trigger.
-- `reduce-budget`: use for a persistently weak Campaign only after identifying leaf-level causes; never use it as a substitute for fixing one bad keyword or target.
-- `reallocate-budget`: require a named weak/non-spending donor and a named efficient, actually constrained receiver.
-- `increase-placement-bid` or `lower-placement-bid`: require sufficient placement evidence and an explicit target. Placement share alone is not a trigger. Keep legacy `adjust-placement` only for old reports.
-- `review-structure`: use for enabled zero-spend Campaign cleanup, excessive fragmentation, or other clear structure-maintenance directions that do not require a bid/budget mutation.
-- `observe`: use below the sample gate or when evidence conflicts. Keep it in the observation/data-gap area, not the primary action rail.
-
-Never say an action was applied. Never calculate or recommend a concrete bid, budget, percentage, or placement adjustment. Returned suggested values may appear only as clearly sourced raw evidence, not as the recommendation value.
+每项建议包含 `action/entity/priority/dimension/reasons/evidence/risk/confidence`；实体需要可定位的标识与活动、广告组上下文。`observations` 记录缺口及非动作信号，不混入建议。展示预览每类最多 5 行，但分析覆盖全部成功获取的行。
