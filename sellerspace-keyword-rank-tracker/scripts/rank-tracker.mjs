@@ -34,6 +34,7 @@ const TARGET_COLUMNS = [
   "marketplace",
   "target_asin",
   "keyword",
+  "keyword_key",
   "pages_requested",
   "pages_completed",
   "result_count",
@@ -143,7 +144,7 @@ export function validatePreflight(preflight) {
 export async function parseKeywordsFile(filePath) {
   let content;
   try {
-    content = await readFile(filePath, "utf8");
+    content = new TextDecoder("utf-8", { fatal: true }).decode(await readFile(filePath));
   } catch (error) {
     throw new RankTrackerError(
       "KEYWORDS_FILE_UNREADABLE",
@@ -157,7 +158,7 @@ export async function parseKeywordsFile(filePath) {
   for (const rawLine of content.split(/\r?\n/)) {
     const keyword = rawLine.trim();
     if (!keyword || keyword.startsWith("#")) continue;
-    const key = keyword.normalize("NFKC").toLocaleLowerCase("en-US");
+    const key = keywordKey(keyword);
     if (seen.has(key)) continue;
     seen.add(key);
     keywords.push(keyword);
@@ -192,7 +193,10 @@ export async function prepareRun(input, options = {}) {
   if (existingProject) validateProjectIdentity(existingProject, config);
 
   const now = options.now instanceof Date ? options.now : new Date();
-  const runId = options.runId ?? createRunId(now);
+  const runId = requiredSafeRunId(options.runId ?? createRunId(now));
+  if (await readJsonIfExists(path.join(config.output_dir, "runs", `${runId}.json`))) {
+    throw new RankTrackerError("RUN_ALREADY_EXISTS", "run_id 已存在，不能覆盖已有运行");
+  }
   const month = now.toISOString().slice(0, 7);
   const keywordHash = createHash("sha256")
     .update(keywords.join("\n"), "utf8")
@@ -237,6 +241,7 @@ export async function prepareRun(input, options = {}) {
     keywords: keywords.map((keyword, index) => ({
       index,
       keyword,
+      keyword_key: keywordKey(keyword),
       status: "pending",
       attempts: [],
     })),
@@ -244,33 +249,51 @@ export async function prepareRun(input, options = {}) {
   };
   await writeJsonAtomic(path.join(config.output_dir, relativeOutputs.manifest), manifest);
 
+  return runPlan(manifest, config.output_dir);
+}
+
+function runPlan(manifest, outputDir) {
   return {
     ok: true,
-    run_id: runId,
-    output_dir: config.output_dir,
-    browser_id: preflight.browser_id,
+    run_id: manifest.run_id,
+    output_dir: outputDir,
+    browser_id: manifest.browser.browser_id,
     action: ACTION_ID,
-    tasks: keywords.map((keyword, keywordIndex) => ({
-      keyword_index: keywordIndex,
-      keyword,
-      result_delivery: {
-        mode: "artifact",
-        targetAsin: config.asin,
-      },
-      params: {
-        keyword,
-        marketplace: config.marketplace,
-        pages: config.pages,
-        mode: "auto",
-        screenshot: false,
-        upload: true,
-      },
-    })),
-    outputs: relativeOutputs,
+    tasks: manifest.keywords
+      .filter((item) => ["pending", "submitted"].includes(item.status) || canRetry(item))
+      .sort((a, b) => Number(b.status === "submitted") - Number(a.status === "submitted") || a.index - b.index)
+      .map((item) => ({
+        keyword_index: item.index,
+        keyword: item.keyword,
+        next_action: item.status === "submitted" ? "poll" : "submit",
+        ...(item.status === "submitted" ? { job_id: item.job_id } : {}),
+        attempts: item.attempts,
+        result_delivery: {
+          mode: "artifact",
+          targetAsin: manifest.input.asin,
+        },
+        params: {
+          keyword: item.keyword,
+          marketplace: manifest.input.marketplace,
+          pages: manifest.input.pages,
+          mode: "auto",
+          screenshot: false,
+          upload: true,
+        },
+      })),
+    outputs: manifest.outputs,
   };
 }
 
-export async function recordResult(input, options = {}) {
+function canRetry(keyword) {
+  return keyword.status === "failed"
+    && keyword.attempts?.length === 1
+    && nonEmptyString(keyword.attempts[0].job_id)
+    && keyword.attempts[0].status === "failed"
+    && ["TIMEOUT", "ACTION_FAILED"].includes(keyword.error?.code);
+}
+
+async function readRunningRun(input, options) {
   const outputDir = requiredAbsolutePath(input?.output_dir, "output_dir", options.cwd);
   const runId = requiredSafeRunId(input?.run_id);
   const manifestPath = path.join(outputDir, "runs", `${runId}.json`);
@@ -278,10 +301,76 @@ export async function recordResult(input, options = {}) {
   if (manifest.status !== "running") {
     throw new RankTrackerError("RUN_FINALIZED", `运行 ${runId} 已结束，不能继续写入结果`);
   }
+  return { outputDir, runId, manifestPath, manifest };
+}
+
+function requireKeyword(manifest, input) {
   const keywordIndex = toInteger(input?.keyword_index);
   if (keywordIndex === null || !manifest.keywords?.[keywordIndex]) {
     throw new RankTrackerError("INVALID_KEYWORD_INDEX", "keyword_index 不属于本次运行");
   }
+  return manifest.keywords[keywordIndex];
+}
+
+export async function recordSubmission(input, options = {}) {
+  const { runId, manifestPath, manifest } = await readRunningRun(input, options);
+  const keyword = requireKeyword(manifest, input);
+  const jobId = input?.task?.jobId;
+  if (input?.task?.status !== "running" || !nonEmptyString(jobId)) {
+    throw new RankTrackerError("INVALID_SUBMISSION", "必须传入提交响应中的 running 状态和 jobId");
+  }
+  if (keyword.status === "submitted" && keyword.job_id === jobId) {
+    return { ok: true, run_id: runId, keyword_index: keyword.index, job_id: jobId, idempotent: true };
+  }
+  if (keyword.status !== "pending" && !canRetry(keyword)) {
+    throw new RankTrackerError("SUBMISSION_NOT_ALLOWED", "关键词已有任务或已结束，不能重复提交");
+  }
+  if (manifest.keywords.some((item) => item.status === "submitted")) {
+    throw new RankTrackerError("TASK_IN_FLIGHT", "必须先归档当前已提交任务，再提交下一个关键词");
+  }
+  const next = manifest.keywords.find((item) => item.status === "pending" || canRetry(item));
+  if (next?.index !== keyword.index) {
+    throw new RankTrackerError("KEYWORD_ORDER_MISMATCH", "必须按任务顺序提交关键词");
+  }
+  if (manifest.keywords.some((item) => item.attempts?.some((attempt) => attempt.job_id === jobId))) {
+    throw new RankTrackerError("JOB_ID_REUSED", "新任务必须使用新的 jobId");
+  }
+  manifest.keywords[keyword.index] = {
+    index: keyword.index,
+    keyword: keyword.keyword,
+    keyword_key: keywordKey(keyword.keyword),
+    status: "submitted",
+    job_id: jobId,
+    submitted_at: validTimestamp(input.task.createdAt)
+      ?? (options.now instanceof Date ? options.now : new Date()).toISOString(),
+    attempts: [...keyword.attempts, { job_id: jobId, status: "running" }],
+  };
+  await writeJsonAtomic(manifestPath, manifest);
+  return { ok: true, run_id: runId, keyword_index: keyword.index, job_id: jobId, idempotent: false };
+}
+
+export async function resumeRun(input, options = {}) {
+  const preflight = validatePreflight(input?.preflight);
+  const { outputDir, runId, manifestPath, manifest } = await readRunningRun(input, options);
+  if (manifest.browser.browser_id !== preflight.browser_id) {
+    throw new RankTrackerError("BROWSER_SELECTION_MISMATCH", "恢复时必须选择本次运行原先使用的浏览器");
+  }
+  // 暂存结果先于清单落盘；恢复二者之间中断的写入。
+  for (const keyword of manifest.keywords) {
+    const stage = await readJsonIfExists(stageResultPath(outputDir, runId, keyword.index));
+    if (stage && (!keyword.job_id || keyword.job_id === stage.job_id)) {
+      manifest.keywords[keyword.index] = keywordFromStage(keyword, stage);
+    }
+  }
+  manifest.preflight = preflight;
+  await writeJsonAtomic(manifestPath, manifest);
+  return runPlan(manifest, outputDir);
+}
+
+export async function recordResult(input, options = {}) {
+  const { outputDir, runId, manifestPath, manifest } = await readRunningRun(input, options);
+  const keywordState = requireKeyword(manifest, input);
+  const keywordIndex = keywordState.index;
   const task = input?.task;
   if (!task || !["completed", "failed"].includes(task.status)) {
     throw new RankTrackerError(
@@ -289,8 +378,20 @@ export async function recordResult(input, options = {}) {
       "任务状态 task.status 必须为 completed（已完成）或 failed（失败）",
     );
   }
-  const attempts = normalizeAttempts(input?.attempts, task);
-  const keywordState = manifest.keywords[keywordIndex];
+  const jobId = task.jobId ?? task.job_id;
+  if (keywordState.status === "submitted" && keywordState.job_id !== jobId) {
+    throw new RankTrackerError("JOB_ID_MISMATCH", "结果 jobId 与已提交任务不一致");
+  }
+  const finalAttempt = { job_id: jobId ?? "", status: task.status, error: task.error };
+  const savedAttempts = keywordState.job_id === jobId && keywordState.attempts?.length > 0
+    ? [...keywordState.attempts.slice(0, -1), finalAttempt]
+    : task.status === "failed" && !nonEmptyString(jobId) && canRetry(keywordState)
+      ? [...keywordState.attempts, finalAttempt]
+      : undefined;
+  const attempts = normalizeAttempts(input?.attempts ?? savedAttempts, task);
+  if (savedAttempts && JSON.stringify(attempts) !== JSON.stringify(normalizeAttempts(savedAttempts, task))) {
+    throw new RankTrackerError("ATTEMPT_HISTORY_MISMATCH", "尝试摘要与已保存的提交记录不一致");
+  }
   const recordedAt = validTimestamp(task.finishedAt ?? task.finished_at)
     ?? (options.now instanceof Date ? options.now : new Date()).toISOString();
   let stage;
@@ -301,6 +402,7 @@ export async function recordResult(input, options = {}) {
         loaded.result,
         keywordState.keyword,
         manifest.input.marketplace,
+        manifest.input.pages,
       );
       stage = {
         schema_version: SCHEMA_VERSION,
@@ -347,22 +449,7 @@ export async function recordResult(input, options = {}) {
 
   const stagePath = stageResultPath(outputDir, runId, keywordIndex);
   await writeJsonAtomic(stagePath, stage);
-  manifest.keywords[keywordIndex] = {
-    ...keywordState,
-    status: stage.status,
-    recorded_at: stage.recorded_at,
-    job_id: stage.job_id,
-    attempts,
-    ...(stage.error ? { error: stage.error } : {}),
-    ...(stage.source_artifact ? { source_artifact: stage.source_artifact } : {}),
-    ...(stage.status === "completed" || stage.status === "blocked"
-      ? {
-          blocked: stage.blocked,
-          pages_completed: stage.pages_completed,
-          result_count: stage.rows.length,
-        }
-      : {}),
-  };
+  manifest.keywords[keywordIndex] = keywordFromStage(keywordState, stage);
   await writeJsonAtomic(manifestPath, manifest);
 
   return {
@@ -375,6 +462,27 @@ export async function recordResult(input, options = {}) {
   };
 }
 
+function keywordFromStage(keyword, stage) {
+  return {
+    index: keyword.index,
+    keyword: keyword.keyword,
+    keyword_key: keywordKey(keyword.keyword),
+    status: stage.status,
+    recorded_at: stage.recorded_at,
+    job_id: stage.job_id,
+    attempts: stage.attempts,
+    ...(stage.error ? { error: stage.error } : {}),
+    ...(stage.source_artifact ? { source_artifact: stage.source_artifact } : {}),
+    ...(stage.status === "completed" || stage.status === "blocked"
+      ? {
+          blocked: stage.blocked,
+          pages_completed: stage.pages_completed,
+          result_count: stage.rows.length,
+        }
+      : {}),
+  };
+}
+
 export async function finalizeRun(input, options = {}) {
   const outputDir = requiredAbsolutePath(input?.output_dir, "output_dir", options.cwd);
   const runId = requiredSafeRunId(input?.run_id);
@@ -383,6 +491,7 @@ export async function finalizeRun(input, options = {}) {
 
   if (manifest.finalized_at) {
     const report = await renderReport({ output_dir: outputDir, asin: manifest.input.asin });
+    await rm(path.join(outputDir, "runs", ".staging", runId), { recursive: true, force: true });
     return {
       ok: true,
       idempotent: true,
@@ -395,9 +504,23 @@ export async function finalizeRun(input, options = {}) {
 
   const now = options.now instanceof Date ? options.now : new Date();
   const stageResults = new Map();
+  let hasUnresolvedTask = false;
   for (const keyword of manifest.keywords) {
-    const stage = await readJsonIfExists(stageResultPath(outputDir, runId, keyword.index));
-    if (stage) stageResults.set(keyword.index, stage);
+    let stage = await readJsonIfExists(stageResultPath(outputDir, runId, keyword.index));
+    if (keyword.status === "submitted" && stage?.job_id !== keyword.job_id) {
+      hasUnresolvedTask = true;
+      const error = { code: "RESULT_NOT_RECORDED", message: "运行结束时已提交任务尚未归档；浏览器任务可能仍在执行" };
+      stage = failedStage({
+        runId, keywordIndex: keyword.index, keyword: keyword.keyword,
+        recordedAt: now.toISOString(), jobId: keyword.job_id,
+        attempts: [...keyword.attempts.slice(0, -1), { job_id: keyword.job_id, status: "failed", error }],
+        error,
+      });
+    }
+    if (stage) {
+      stageResults.set(keyword.index, stage);
+      manifest.keywords[keyword.index] = keywordFromStage(keyword, stage);
+    }
   }
 
   const targetRows = [];
@@ -424,17 +547,11 @@ export async function finalizeRun(input, options = {}) {
 
   const targetHistoryPath = path.join(outputDir, manifest.outputs.target_history);
   const existingTargetRows = await readCsvIfExists(targetHistoryPath);
-  const existingKeys = new Set(
-    existingTargetRows.map((row) => `${row.run_id}\u0000${row.keyword}`),
-  );
-  const mergedTargetRows = [...existingTargetRows];
-  for (const row of targetRows) {
-    const key = `${row.run_id}\u0000${row.keyword}`;
-    if (!existingKeys.has(key)) {
-      existingKeys.add(key);
-      mergedTargetRows.push(row);
-    }
-  }
+  // 可重试尚未提交清单的结束操作；只替换本次运行，保留旧运行。
+  const mergedTargetRows = [
+    ...existingTargetRows.filter((row) => row.run_id !== runId),
+    ...targetRows,
+  ].map((row) => ({ ...row, keyword_key: keywordKey(row.keyword) }));
   await writeCsvAtomic(targetHistoryPath, TARGET_COLUMNS, mergedTargetRows);
 
   const rawPath = path.join(outputDir, manifest.outputs.all_asins);
@@ -443,7 +560,7 @@ export async function finalizeRun(input, options = {}) {
   const counts = countStatuses(targetRows);
   const hasPending = counts.not_executed > 0;
   const hasIssues = counts.failed > 0 || counts.blocked > 0;
-  manifest.status = hasPending || input?.interrupted === true
+  manifest.status = hasPending || hasUnresolvedTask || input?.interrupted === true
     ? "incomplete"
     : hasIssues
       ? "completed_with_issues"
@@ -501,6 +618,7 @@ export async function renderReport(input, options = {}) {
   if (rows.length === 0) {
     throw new RankTrackerError("NO_HISTORY", `ASIN ${asin} 暂无可生成报告的历史数据`);
   }
+  rows = rows.map((row) => ({ ...row, keyword_key: keywordKey(row.keyword) }));
   rows.sort(compareCollectedAt);
 
   const latestRunId = rows.at(-1)?.run_id ?? "";
@@ -511,6 +629,10 @@ export async function renderReport(input, options = {}) {
   const reportPath = isTarget
     ? path.join(outputDir, "report.html")
     : path.join(outputDir, "reports", `${asin}.html`);
+  const historyPath = isTarget
+    ? path.join(outputDir, "target-rank-history.csv")
+    : path.join(outputDir, "reports", `${asin}-rank-history.csv`);
+  if (!isTarget) await writeCsvAtomic(historyPath, TARGET_COLUMNS, rows);
   const prefix = isTarget ? "" : "../";
   const latestRaw = latestManifest?.outputs?.all_asins
     ? `${prefix}${latestManifest.outputs.all_asins}`
@@ -519,7 +641,7 @@ export async function renderReport(input, options = {}) {
     project,
     asin,
     rows,
-    targetHistoryHref: `${prefix}target-rank-history.csv`,
+    targetHistoryHref: relativeFrom(path.dirname(reportPath), historyPath),
     latestRawHref: latestRaw,
   });
   await writeTextAtomic(reportPath, html);
@@ -528,6 +650,7 @@ export async function renderReport(input, options = {}) {
     asin,
     observation_count: rows.length,
     report_path: reportPath,
+    history_path: historyPath,
   };
 }
 
@@ -636,6 +759,11 @@ function normalizeAttempts(value, task) {
       "最后一次尝试的状态必须与 task.status 一致",
     );
   }
+  const jobId = task.jobId ?? task.job_id ?? "";
+  if (normalized.at(-1)?.job_id !== jobId
+    || (normalized.length === 2 && normalized[0].job_id === normalized[1].job_id)) {
+    throw new RankTrackerError("ATTEMPT_JOB_MISMATCH", "最终任务标识必须匹配，重试必须使用新的 jobId");
+  }
   return normalized;
 }
 
@@ -667,19 +795,16 @@ function failedStage({
 }
 
 async function loadCompletedBrowserResult(task, options) {
-  if (task.artifact !== undefined && task.result !== undefined) {
+  if (task.result !== undefined) {
     throw new RankTrackerError(
-      "ARTIFACT_RESPONSE_CONFLICT",
-      "已完成任务不能同时携带全量 result 和结果文件引用",
+      "ARTIFACT_INLINE_FORBIDDEN",
+      "仅接受结果文件引用，不接受内嵌全量 result",
     );
   }
   if (task.artifact !== undefined) {
     return await downloadBrowserArtifact(task.artifact, options);
   }
-  if (task.result !== undefined) {
-    return { result: task.result, source_artifact: null };
-  }
-  throw new RankTrackerError("INVALID_BROWSER_RESULT", "已完成任务缺少 result 或结果文件引用");
+  throw new RankTrackerError("ARTIFACT_REFERENCE_INVALID", "已完成任务缺少结果文件引用");
 }
 
 export async function downloadBrowserArtifact(artifact, options = {}) {
@@ -691,70 +816,57 @@ export async function downloadBrowserArtifact(artifact, options = {}) {
     throw new RankTrackerError("ARTIFACT_REFERENCE_INVALID", "结果文件下载地址 downloadUrl 格式无效");
   }
   const localHttp = url.protocol === "http:"
-    && ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+    && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if (url.protocol !== "https:" && !localHttp) {
-    throw new RankTrackerError(
-      "ARTIFACT_URL_UNSAFE",
-      "结果文件下载地址必须使用 HTTPS；仅本机测试允许 HTTP 回环地址",
-    );
+    throw new RankTrackerError("ARTIFACT_URL_UNSAFE", "结果文件下载地址必须使用 HTTPS；仅本机测试允许 HTTP 回环地址");
   }
-
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") {
     throw new RankTrackerError("ARTIFACT_DOWNLOAD_FAILED", "当前 Node.js 环境不支持下载结果文件");
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ARTIFACT_DOWNLOAD_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), options.downloadTimeoutMs ?? ARTIFACT_DOWNLOAD_TIMEOUT_MS);
   timer.unref?.();
-  let response;
   try {
-    response = await fetchImpl(url, {
+    const response = await fetchImpl(url, {
       method: "GET",
       headers: { accept: "application/json" },
       redirect: "error",
       signal: controller.signal,
     });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new RankTrackerError("ARTIFACT_DOWNLOAD_FAILED", `结果文件下载失败（HTTP ${response.status}）`);
+    }
+    const bytes = await readResponseBytes(response, MAX_ARTIFACT_BYTES);
+    if (reference.uncompressedSizeBytes !== bytes.byteLength) {
+      throw new RankTrackerError("ARTIFACT_SIZE_MISMATCH", "结果文件解压后大小与引用元数据不一致", { expected: reference.uncompressedSizeBytes, actual: bytes.byteLength });
+    }
+    const checksum = createHash("sha256").update(bytes).digest("hex");
+    if (checksum !== reference.sha256) {
+      throw new RankTrackerError("ARTIFACT_CHECKSUM_MISMATCH", "结果文件 SHA-256 校验失败");
+    }
+    let result;
+    try {
+      result = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch {
+      throw new RankTrackerError("ARTIFACT_INVALID_JSON", "结果文件内容不是有效 JSON");
+    }
+    return {
+      result,
+      source_artifact: {
+        ...sanitizeArtifactReference(reference),
+        downloaded_at: new Date().toISOString(),
+      },
+    };
   } catch (error) {
-    const reason = error?.name === "AbortError" ? "下载超时" : "网络请求失败";
+    if (error instanceof RankTrackerError)
+      throw error;
+    const reason = controller.signal.aborted ? "下载超时" : "下载中断或网络请求失败";
     throw new RankTrackerError("ARTIFACT_DOWNLOAD_FAILED", `结果文件${reason}`);
   } finally {
     clearTimeout(timer);
   }
-  if (!response.ok) {
-    throw new RankTrackerError(
-      "ARTIFACT_DOWNLOAD_FAILED",
-      `结果文件下载失败（HTTP ${response.status}）`,
-    );
-  }
-
-  const bytes = await readResponseBytes(response, MAX_ARTIFACT_BYTES);
-  if (reference.uncompressedSizeBytes !== bytes.byteLength) {
-    throw new RankTrackerError(
-      "ARTIFACT_SIZE_MISMATCH",
-      "结果文件解压后大小与引用元数据不一致",
-      { expected: reference.uncompressedSizeBytes, actual: bytes.byteLength },
-    );
-  }
-  const checksum = createHash("sha256").update(bytes).digest("hex");
-  if (checksum !== reference.sha256) {
-    throw new RankTrackerError(
-      "ARTIFACT_CHECKSUM_MISMATCH",
-      "结果文件 SHA-256 校验失败",
-    );
-  }
-  let result;
-  try {
-    result = JSON.parse(bytes.toString("utf8"));
-  } catch {
-    throw new RankTrackerError("ARTIFACT_INVALID_JSON", "结果文件内容不是有效 JSON");
-  }
-  return {
-    result,
-    source_artifact: {
-      ...sanitizeArtifactReference(reference),
-      downloaded_at: new Date().toISOString(),
-    },
-  };
 }
 
 function validateArtifactReference(value) {
@@ -839,20 +951,41 @@ async function readResponseBytes(response, maximumBytes) {
   return Buffer.concat(chunks, total);
 }
 
-function normalizeBrowserResult(result, keyword, marketplace) {
-  if (!result || typeof result !== "object") {
-    throw new RankTrackerError("INVALID_BROWSER_RESULT", "已完成任务缺少结果对象 result");
+function normalizeBrowserResult(result, keyword, marketplace, pagesRequested) {
+  const invalid = (message) => { throw new RankTrackerError("ARTIFACT_RESULT_INVALID", message); };
+  if (!result || typeof result !== "object" || Array.isArray(result)
+    || typeof result.blocked !== "boolean" || !Array.isArray(result.pages)) {
+    invalid("结果文件必须包含 blocked 布尔值和 pages 数组");
   }
-  const pages = Array.isArray(result.pages) ? result.pages : [];
+  if (!nonEmptyString(result.keyword) || keywordKey(result.keyword) !== keywordKey(keyword)
+    || !nonEmptyString(result.marketplace) || result.marketplace.trim().toUpperCase() !== marketplace) {
+    throw new RankTrackerError("ARTIFACT_IDENTITY_MISMATCH", "结果文件的关键词或站点与本次任务不一致");
+  }
+  const pages = result.pages;
+  const blocked = result.blocked || pages.some((page) => page?.blocked === true);
+  if (pages.length > pagesRequested || (!blocked && pages.length !== pagesRequested)
+    || (result.pageCount !== undefined && result.pageCount !== pagesRequested)) {
+    invalid("结果页数与请求不符，未完成的抓取不能记为未找到");
+  }
   const rows = [];
   pages.forEach((pageResult, pageIndex) => {
-    const pageNumber = toInteger(pageResult?.page) ?? pageIndex + 1;
-    const pageMode = nonEmptyString(pageResult?.mode) ? String(pageResult.mode) : "";
+    if (!pageResult || pageResult.page !== pageIndex + 1
+      || !["fetch", "tab"].includes(pageResult.mode) || !Array.isArray(pageResult.asins)
+      || (pageResult.blocked !== undefined && typeof pageResult.blocked !== "boolean")) {
+      invalid("每页必须包含连续页码、有效抓取模式和 asins 数组");
+    }
+    const pageNumber = pageResult.page;
+    const pageMode = pageResult.mode;
     const pageUrl = nonEmptyString(pageResult?.url) ? String(pageResult.url) : "";
-    const items = Array.isArray(pageResult?.asins) ? pageResult.asins : [];
+    const items = pageResult.asins;
     for (const item of items) {
       const asin = normalizeAsinLoose(item?.asin);
-      if (!asin) continue;
+      const hasNaturalRank = item?.naturalRank !== undefined && item?.naturalRank !== null;
+      if (!asin || !Number.isSafeInteger(item.rank) || item.rank < 1
+        || (hasNaturalRank && (!Number.isSafeInteger(item.naturalRank) || item.naturalRank < 1))
+        || (item.adType != null && typeof item.adType !== "string")) {
+        invalid("商品记录必须包含有效 ASIN、正整数位置，以及有效的自然排名和广告类型");
+      }
       rows.push({
         page: pageNumber,
         page_mode: pageMode,
@@ -866,8 +999,9 @@ function normalizeBrowserResult(result, keyword, marketplace) {
   });
   return {
     keyword,
+    keyword_key: keywordKey(keyword),
     marketplace,
-    blocked: result.blocked === true,
+    blocked,
     requested_mode: nonEmptyString(result.requestedMode)
       ? String(result.requestedMode)
       : "auto",
@@ -877,6 +1011,9 @@ function normalizeBrowserResult(result, keyword, marketplace) {
 }
 
 function targetRowFromStage(manifest, keywordState, stage) {
+  if (["pending", "not_executed"].includes(stage.status)) {
+    return targetRowNotExecuted(manifest, keywordState, stage.recorded_at);
+  }
   if (stage.status === "failed") {
     return baseTargetRow(manifest, keywordState, stage.recorded_at, {
       status: "failed",
@@ -935,6 +1072,7 @@ function baseTargetRow(manifest, keywordState, collectedAt, overrides = {}) {
     marketplace: manifest.input.marketplace,
     target_asin: manifest.input.asin,
     keyword: keywordState.keyword,
+    keyword_key: keywordKey(keywordState.keyword),
     pages_requested: manifest.input.pages,
     pages_completed: 0,
     result_count: 0,
@@ -971,70 +1109,25 @@ async function buildObservedAsinHistory(outputDir, project, asin) {
   manifests.sort((a, b) => String(a.started_at).localeCompare(String(b.started_at)));
   const history = [];
   for (const manifest of manifests) {
-    const rawRows = await readCsvIfExists(path.join(outputDir, manifest.outputs.all_asins));
+    const rawRows = await readCsvIfExists(path.join(outputDir, manifest.outputs.all_asins), true);
     const allByKeyword = new Map();
-    const matchedByKeyword = new Map();
     for (const row of rawRows) {
-      const keyword = row.keyword;
-      if (!allByKeyword.has(keyword)) allByKeyword.set(keyword, []);
-      allByKeyword.get(keyword).push(row);
-      if (normalizeAsinLoose(row.asin) === asin) {
-        if (!matchedByKeyword.has(keyword)) matchedByKeyword.set(keyword, []);
-        matchedByKeyword.get(keyword).push(row);
-      }
+      const key = keywordKey(row.keyword);
+      if (!allByKeyword.has(key)) allByKeyword.set(key, []);
+      allByKeyword.get(key).push(row);
     }
-    for (const keywordState of manifest.keywords ?? []) {
-      const matches = matchedByKeyword.get(keywordState.keyword) ?? [];
-      const keywordRows = allByKeyword.get(keywordState.keyword) ?? [];
-      const naturalRanks = matches
-        .map((row) => toInteger(row.natural_rank))
-        .filter((rank) => rank !== null);
-      const adRows = matches.filter(
-        (row) => toInteger(row.natural_rank) === null && nonEmptyString(row.ad_type),
-      );
-      const adPositions = adRows
-        .map((row) => toInteger(row.position))
-        .filter((rank) => rank !== null);
-      const overallPositions = matches
-        .map((row) => toInteger(row.position))
-        .filter((rank) => rank !== null);
-      const pagesCompleted = toInteger(keywordState.pages_completed) ?? keywordRows.reduce(
-        (max, row) => Math.max(max, toInteger(row.page) ?? 0),
-        0,
-      );
-      const sourceStatus = keywordState.status;
-      const status = sourceStatus === "failed"
-        ? "failed"
-        : sourceStatus === "blocked"
-          ? "blocked"
-          : sourceStatus === "pending"
-            ? "not_executed"
-            : matches.length > 0
-              ? "ok"
-              : "not_found";
-      const blocked = status === "blocked";
-      history.push({
-        run_id: manifest.run_id,
-        collected_at: keywordState.recorded_at ?? manifest.finished_at ?? manifest.started_at,
-        marketplace: project.marketplace,
-        target_asin: asin,
-        keyword: keywordState.keyword,
-        pages_requested: manifest.input.pages,
-        pages_completed: pagesCompleted,
-        result_count: toInteger(keywordState.result_count) ?? keywordRows.length,
-        blocked,
-        target_found: blocked ? false : matches.length > 0,
-        natural_found: blocked ? false : naturalRanks.length > 0,
-        natural_rank: blocked ? "" : minOrBlank(naturalRanks),
-        ad_found: blocked ? false : adRows.length > 0,
-        best_ad_position: blocked ? "" : minOrBlank(adPositions),
-        ad_types: blocked ? "" : [...new Set(adRows.map((row) => row.ad_type).filter(Boolean))].sort().join(" | "),
-        ad_occurrence_count: blocked ? 0 : adRows.length,
-        best_overall_position: blocked ? "" : minOrBlank(overallPositions),
-        status,
-        error_code: keywordState.error?.code ?? "",
-        error_message: keywordState.error?.message ?? "",
-      });
+    const observedManifest = { ...manifest, input: { ...manifest.input, asin, marketplace: project.marketplace } };
+    for (const keyword of manifest.keywords ?? []) {
+      const rows = allByKeyword.get(keywordKey(keyword.keyword)) ?? [];
+      history.push(targetRowFromStage(observedManifest, keyword, {
+        status: keyword.status,
+        blocked: keyword.status === "blocked",
+        error: keyword.error,
+        recorded_at: keyword.recorded_at ?? manifest.finished_at ?? manifest.started_at,
+        pages_completed: toInteger(keyword.pages_completed)
+          ?? rows.reduce((max, row) => Math.max(max, toInteger(row.page) ?? 0), 0),
+        rows,
+      }));
     }
   }
   return history;
@@ -1118,9 +1211,10 @@ function minOrBlank(values) {
 }
 
 function toInteger(value) {
-  if (value === "" || value === null || value === undefined) return null;
+  if ((typeof value !== "number" && typeof value !== "string")
+    || (typeof value === "string" && value.trim() === "")) return null;
   const number = Number(value);
-  return Number.isInteger(number) && Number.isFinite(number) ? number : null;
+  return Number.isSafeInteger(number) ? number : null;
 }
 
 function nonEmptyString(value) {
@@ -1128,11 +1222,17 @@ function nonEmptyString(value) {
 }
 
 function validTimestamp(value) {
-  return nonEmptyString(value) && Number.isFinite(Date.parse(value)) ? String(value) : null;
+  const millis = typeof value === "number" ? value : nonEmptyString(value) ? Date.parse(value) : NaN;
+  const date = new Date(millis);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function keywordKey(value) {
+  return String(value ?? "").trim().normalize("NFKC").toLocaleLowerCase("en-US");
 }
 
 function compareCollectedAt(a, b) {
-  return String(a.collected_at).localeCompare(String(b.collected_at));
+  return (Date.parse(a.collected_at) || 0) - (Date.parse(b.collected_at) || 0);
 }
 
 async function readRequiredJson(filePath, code, message) {
@@ -1184,11 +1284,12 @@ function csvCell(value) {
   return /[",]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-async function readCsvIfExists(filePath) {
+async function readCsvIfExists(filePath, required = false) {
   try {
     await access(filePath);
-  } catch {
-    return [];
+  } catch (error) {
+    if (error?.code === "ENOENT" && !required) return [];
+    throw new RankTrackerError("ARCHIVE_UNREADABLE", `无法读取历史 CSV：${filePath}`);
   }
   const stream = createReadStream(filePath, { encoding: "utf8" });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -1263,12 +1364,14 @@ async function readCliInput() {
 
 export async function executeCommand(command, input, options = {}) {
   if (command === "prepare-run") return await prepareRun(input, options);
+  if (command === "record-submission") return await recordSubmission(input, options);
+  if (command === "resume-run") return await resumeRun(input, options);
   if (command === "record-result") return await recordResult(input, options);
   if (command === "finalize-run") return await finalizeRun(input, options);
   if (command === "render-report") return await renderReport(input, options);
   throw new RankTrackerError(
     "UNKNOWN_COMMAND",
-    "命令必须为 prepare-run、record-result、finalize-run 或 render-report",
+    "命令必须为 prepare-run、record-submission、resume-run、record-result、finalize-run 或 render-report",
   );
 }
 

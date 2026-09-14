@@ -1,4 +1,4 @@
 interface:
   display_name: "优麦云亚马逊关键词排名追踪"
   short_description: "通过接口优先抓取与结果文件交付，批量归档亚马逊关键词排名趋势"
-  default_prompt: "使用 $sellerspace-keyword-rank-tracker 检查优麦云 MCP、结果文件交付能力和支持第 5 版及以上关键词排名动作的在线浏览器，再以接口优先的自动模式按 ASIN 与关键词文件抓取并保存排名趋势。"
+  default_prompt: "使用 $sellerspace-keyword-rank-tracker 按 ASIN 和关键词文件采集或恢复排名追踪；采集前检查优麦云 MCP 与在线浏览器，仅重建目标或竞品历史报告时直接使用本地归档。"

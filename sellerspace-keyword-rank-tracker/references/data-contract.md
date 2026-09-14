@@ -2,128 +2,137 @@
 
 ## 目录
 
-- 输入约定
-- 预检凭据
-- 脚本命令
-- 输出目录结构
-- CSV 字段定义
-- 状态与排名口径
+- 输入与预检
+- 命令与运行状态
+- 结果文件校验
+- 输出目录和字段
 
-## 输入约定
+## 输入与预检
 
-`prepare-run` 通过标准输入接收一个 JSON 对象。可以传入 `config_path`、直接提供的字段，或同时传入两者；直接提供的字段覆盖配置文件中的同名值。
+所有命令从非终端标准输入读取第一条非空的单行 JSON，输出一个紧凑 JSON 对象；失败时向标准错误输出 `{ok:false,error:{code,message}}` 并使用非零退出码。使用 Node.js 22 及以上版本。
+
+`prepare-run` 输入示例（组装后通过单行 JSON 传入）：
 
 ```json
 {
-  "config_path": "/absolute/or/relative/job.json",
+  "config_path": "/absolute/job.json",
   "asin": "B0XXXXXXXX",
   "marketplace": "US",
   "pages": 3,
   "keywords_file": "./keywords.txt",
   "output_dir": "./rank-data/B0XXXXXXXX-US",
-  "browser_id": "optional-browser-id",
-  "preflight": {}
+  "browser_id": "selected-browser-id",
+  "preflight": {
+    "mcp_ready": true,
+    "required_tools": ["discover_capabilities", "browser_list", "browser_submit_task", "browser_get_task"],
+    "action_id": "amazon.search.keyword_rank",
+    "action_available": true,
+    "action_version": 5,
+    "browser_online": true,
+    "browser_id": "selected-browser-id",
+    "artifact_delivery_available": true,
+    "artifact_schema_version": 1,
+    "checked_at": "2026-09-14T08:00:00.000Z",
+    "browser_meta": {"name":"办公室电脑","browser":"chrome","os":"mac"}
+  }
 }
 ```
 
-合并输入后必须具备以下字段：
+`config_path` 可省略，直接提供的参数覆盖配置中的同名值。配置文件内的相对路径以该文件所在目录为基准，直接提供的相对路径以工作目录为基准。
 
-- `asin`：10 位字母或数字，统一转为大写。
-- `marketplace`：站点，不得为空，统一转为大写。
-- `pages`：抓取页数，必须是 1–10 的整数，无默认值。
-- `keywords_file`：UTF-8 文本文件，每行一个关键词。
-- `output_dir`：明确指定的数据项目目录。
+合并后必须有：10 位字母数字 `asin`、非空 `marketplace`、1–10 整数 `pages`、`keywords_file`、`output_dir`。ASIN 和站点转大写，不补默认值。可选 `browser_id` 必须与预检一致。
 
-`job.json` 中的相对路径以配置文件所在目录为基准；直接提供的相对路径以当前工作目录为基准。`browser_id` 可选，但提供时必须与预检选中的浏览器一致。
+关键词文件必须为有效 UTF-8；去 BOM、去行首尾空白，忽略空行及 `#` 注释。按 NFKC 及不区分大小写去重，保留首次写法，数量须为 1–50。
 
-关键词读取器去除 UTF-8 字节顺序标记和每行首尾空白，忽略空行与 `#` 注释，按 NFKC 规范化及不区分大小写的方式去重，保留首次出现的写法。最终必须有 1–50 个关键词。
+预检凭据来自当前真实工具结果：四个工具齐全、MCP 可用、指定动作可用且版本至少 5、所选浏览器在线、支持 artifact schema 1。可选 `checked_at` 支持 ISO 字符串或毫秒数值；`browser_meta` 仅保留 name/browser/version/os/profile。新建和恢复在读取项目文件前校验凭据；`render-report` 不需要凭据。
 
-## 预检凭据
+## 命令与运行状态
 
-`prepare-run` 要求 `preflight` 满足：
+### 准备：`prepare-run`
 
-- `mcp_ready=true`。
-- `required_tools` 包含全部四个优麦云工具。
-- `action_id=amazon.search.keyword_rank`。
-- `action_available=true` 且 `action_version>=5`；第 5 版支持本技能使用的接口优先自动模式（`auto`）。
-- `browser_online=true` 且 `browser_id` 非空。
-- `artifact_delivery_available=true` 且 `artifact_schema_version=1`，均从实时的 `browser_list.taskDelivery` 响应中取得。
-- 可选提供 `checked_at` 和经过字段筛选的 `browser_meta`。
+输入见上文。输出包含 `run_id`、`output_dir`、`browser_id`、`action`、`outputs` 和有序的 `tasks`。每项包含：
 
-本技能必须根据实时工具结果生成凭据。凭据缺失或无效时，必须在读取配置、关键词文件或创建 `output_dir` 之前失败。
+- `keyword_index`、`keyword`、`next_action` 和 `attempts`。
+- `params={keyword,marketplace,pages,mode:"auto",screenshot:false,upload:true}`。
+- `result_delivery={mode:"artifact",targetAsin:<项目 ASIN>}`。
 
-## 脚本命令
+创建 `running` 清单，关键词初始为 `pending`。已有目录必须属于相同 ASIN 和站点；已有 `run_id` 不得覆盖。
 
-所有命令读取非终端标准输入中的第一条非空、单行紧凑 JSON，并输出一个紧凑 JSON 对象。使用不回显输入的管道或会话；不得发送格式化的多行 JSON，也不得使用会回显大量浏览器结果的伪终端。
+### 记录提交：`record-submission`
 
-### 准备运行：`prepare-run`
+```json
+{"output_dir":"/absolute/project","run_id":"run-id","keyword_index":0,"task":{"status":"running","jobId":"job-1","createdAt":1789372800000}}
+```
 
-输入：用户直接提供的参数、配置文件参数，以及 `preflight`。
-
-输出包含 `run_id`、`output_dir`、`browser_id`、`action`、`outputs` 和有序的 `tasks` 数组。每个任务包含 `keyword_index`、`keyword`、原样使用的动作参数 `params`（含 `mode=auto`、`screenshot=false`、`upload=true`），以及 `result_delivery={"mode":"artifact","targetAsin":"<项目 ASIN>"}`。
-
-自动模式下，第 5 版及以上插件优先请求接口，仅当请求被阻断、失败或返回不可用页面时才回退到后台标签页。每页实际采用的 `fetch` 或 `tab` 模式保存在 `page_mode` 中。
+保存 `job_id`、`submitted_at` 和尝试记录，关键词变成 `submitted`。重复保存同一标识是幂等的；有在途任务时拒绝记录另一提交。首次失败为 TIMEOUT/ACTION_FAILED 时才允许记录第二次提交，且必须使用新的 jobId。调用此命令前智能体也必须遵守串行提交约束；本地命令不能撤销已提交的远端任务。
 
 ### 记录结果：`record-result`
 
 ```json
 {
-  "output_dir": "/absolute/project",
-  "run_id": "run-id",
-  "keyword_index": 0,
-  "attempts": [
-    { "job_id": "job-1", "status": "failed", "error": { "code": "TIMEOUT", "message": "首次请求超时" } },
-    { "job_id": "job-2", "status": "completed" }
-  ],
-  "task": {
-    "status": "completed",
-    "jobId": "job-2",
-    "finishedAt": "2026-08-11T08:10:00.000Z",
-    "summary": {
-      "resultCount": 96,
-      "target": { "asin": "B0XXXXXXXX", "naturalRank": 18 }
-    },
-    "artifact": {
-      "schemaVersion": 1,
-      "id": "2026-08/artifact-id",
-      "downloadUrl": "https://hub.example/artifacts/download?...",
-      "sha256": "64 位小写十六进制字符",
-      "uncompressedSizeBytes": 12345
+  "output_dir":"/absolute/project",
+  "run_id":"run-id",
+  "keyword_index":0,
+  "task":{
+    "status":"completed",
+    "jobId":"job-1",
+    "finishedAt":1789373400000,
+    "summary":{"resultCount":96,"target":{"asin":"B0XXXXXXXX","naturalRank":18}},
+    "artifact":{
+      "schemaVersion":1,
+      "id":"2026-09/artifact-id",
+      "downloadUrl":"https://hub.example/artifacts/download?...",
+      "sha256":"64 位小写十六进制字符",
+      "uncompressedSizeBytes":12345
     }
   }
 }
 ```
 
-`task.status` 必须是 `completed` 或 `failed`，失败任务携带 `error`。最多接受两次浏览器尝试。已完成任务的结果文件下载时禁止重定向，解压后不得超过 64 MiB，须核对 `uncompressedSizeBytes` 和 SHA-256，再按 JSON 解析。仅接受 HTTPS 地址，本地测试可使用 HTTP 回环地址。
+`task.status` 须为 `completed` 或 `failed`；失败携带 `error:{code,message}`。已记录提交时，结果 jobId 必须一致，脚本自动保留此前尝试；无需重新组装 `attempts`。
 
-带签名的下载网址不得写入运行清单；仅保留经过筛选的结果文件元数据，供后续核查。本次运行尚未结束时，再次记录同一关键词会替换其暂存结果。
+兼容未使用 `record-submission` 的既有调用，可显式提供最多两条 `attempts`。最后一条须与任务状态及 jobId 匹配，第二次尝试的前置失败只能是 TIMEOUT/ACTION_FAILED。明确提交失败可没有 jobId，禁止编造标识。
 
-脚本仍接受直接内嵌的 `task.result`，用于兼容已有的确定性单元测试，但本技能不得请求或使用这种交付方式。结果文件接收与校验失败时，`record-result` 将关键词标记为 `failed`，保存 `ARTIFACT_*` 错误码，并继续本次运行，不重新提交浏览器任务。
+完成时间支持毫秒数值和日期字符串，统一存为 UTC ISO；缺失或无效才使用本地记录时间。同一运行结束前可重新记录结果，替换该关键词的暂存数据及错误信息。内嵌 `task.result` 一律拒绝。
 
-### 结束运行：`finalize-run`
+### 恢复：`resume-run`
 
-```json
-{
-  "output_dir": "/absolute/project",
-  "run_id": "run-id",
-  "interrupted": false
-}
-```
+输入 `{output_dir,run_id,preflight}`。要求运行仍为 `running` 且浏览器与原运行一致；不重读关键词源文件。脚本修复“暂存结果已写入、清单尚未更新”的中断，再返回剩余任务：
 
-`interrupted=true` 或仍有待执行关键词时，本次运行标记为 `incomplete`。否则，只要存在失败或页面阻断，就标记为 `completed_with_issues`；其余情况标记为 `completed`。重复结束同一次运行具备幂等性，并会重新生成报告。
+- `submitted` 返回 `next_action="poll"` 和原 `job_id`。
+- `pending` 或仅首次浏览器 TIMEOUT/ACTION_FAILED 返回 `next_action="submit"`。
+- 已归档成功、阻断或最终失败不再返回。
+
+恢复后的参数来自原运行快照。尝试记录不会被暂存的首次失败覆盖正在执行的第二次任务。已结束的运行不能恢复或追加结果。
+
+### 结束：`finalize-run`
+
+输入 `{output_dir,run_id,interrupted:false}`。存在未执行关键词、尚未归档的在途任务，或 `interrupted=true` 时，状态为 `incomplete`；否则存在失败或阻断为 `completed_with_issues`，其余为 `completed`。
+
+已提交但没有最终结果的关键词记录为 `failed/RESULT_NOT_RECORDED`，从未提交的关键词记录为 `not_executed`。本地结束不代表取消了远端任务。
+
+重复结束不重复追加历史；成功生成报告后清理暂存。报告生成失败可再次执行结束操作。结束后不改写该运行的全量 ASIN CSV。
 
 ### 重建报告：`render-report`
 
-```json
-{
-  "output_dir": "/absolute/project",
-  "asin": "B0OPTIONAL1"
-}
-```
+输入 `{output_dir,asin?}`。省略 ASIN 时重建目标报告；其他 ASIN 须在有效全量历史中出现过。返回 `report_path`、`history_path` 和 `observation_count`。
 
-省略 `asin` 时，重建配置中目标 ASIN 的报告。指定其他 ASIN 时，该 ASIN 必须至少在归档的全量结果中出现过一次。
+竞品生成自己的 CSV；全量归档缺失或不可读时明确失败，不生成虚假的“未找到”。仅重建目标报告不修改旧历史 CSV。图表和表格按 `keyword_key` 分组，日期筛选不改变与上次有效观测的比较口径。
 
-## 输出目录结构
+## 结果文件校验
+
+只接受 HTTPS 地址；本机测试允许 HTTP 回环地址。禁止重定向，120 秒超时覆盖响应头和完整响应体，解压后最大 64 MiB；校验大小和 SHA-256 后按 UTF-8 JSON 解析。下载网址不写入清单，仅保存筛选后的元数据。
+
+结果对象要求：
+
+- `keyword`、`marketplace` 与当前任务一致，`blocked` 为布尔值，`pages` 为数组。
+- 非阻断结果须完成请求页数；阻断允许提前结束。存在 `pageCount` 时必须等于请求页数。
+- 每页具有从 1 连续递增的 `page`、`mode="fetch"|"tab"`、`asins` 数组。页面级 `blocked=true` 也会使本关键词按阻断归档。
+- 每次出现包含有效的 10 位 ASIN 和正整数 `rank`；提供的 `naturalRank` 必须为正整数或 null，`adType` 为字符串或空值。
+
+结构、身份、文件下载、大小、校验和或 JSON 校验失败均保存为 `failed/ARTIFACT_*`，不重试浏览器任务。正常完成且未找到目标、页面阻断、失败和未执行记录的排名均留空。
+
+## 输出目录和字段
 
 ```text
 output_dir/
@@ -132,48 +141,26 @@ output_dir/
 ├── report.html
 ├── all-asins/YYYY-MM/<run_id>.csv
 ├── reports/<other_asin>.html
+├── reports/<other_asin>-rank-history.csv
 └── runs/<run_id>.json
 ```
 
-- `project.json`：固定该输出目录对应的 ASIN 与站点，防止不同项目混写。
-- `target-rank-history.csv`：目标 ASIN 在各次运行、各个关键词下的排名历史。
-- `report.html`：目标 ASIN 的交互式趋势报告。
-- `all-asins/YYYY-MM/<run_id>.csv`：本次搜索返回的全部 ASIN 出现记录，按月归档。
-- `reports/<other_asin>.html`：从全量历史重建的其他 ASIN 报告。
-- `runs/<run_id>.json`：运行清单，保存输入快照、浏览器元数据、任务标识、尝试记录、关键词状态、计数和相对输出路径。
+`project.json` 固定 ASIN/站点。运行清单保存输入快照、浏览器、任务和尝试记录、关键词状态、统计及输出路径。暂存数据位于 `runs/.staging/<run_id>/`。同一输出目录只允许一个写入流程，原子文件替换不提供跨进程事务。
 
-临时结果位于 `runs/.staging/` 下，仅在成功完成结束操作后清理。
-
-## CSV 字段定义
-
-两类 CSV 均使用 UTF-8 字节顺序标记、CRLF 换行、RFC 风格的引号转义，以及原子替换写入。
-
-`target-rank-history.csv` 按 `run_id + keyword` 每组保存一行：
+CSV 使用 UTF-8 BOM、CRLF、引号转义和原子替换。目标和竞品排名历史每个 `run_id + keyword_key` 保存一行：
 
 ```text
-run_id,collected_at,marketplace,target_asin,keyword,pages_requested,
+run_id,collected_at,marketplace,target_asin,keyword,keyword_key,pages_requested,
 pages_completed,result_count,blocked,target_found,natural_found,natural_rank,
 ad_found,best_ad_position,ad_types,ad_occurrence_count,best_overall_position,
 status,error_code,error_message
 ```
 
-`all-asins/YYYY-MM/<run_id>.csv` 保留返回结果中的每次出现记录：
+`keyword_key` 为关键词的 NFKC/小写规范化值，兼容没有该列的旧文件；展示保留原始 `keyword`。全量 ASIN CSV 保留每次出现：
 
 ```text
 run_id,collected_at,marketplace,keyword,page,page_mode,page_url,
 position,natural_rank,asin,ad_type
 ```
 
-## 状态与排名口径
-
-- `ok`：该 ASIN 出现在任意位置。
-- `not_found`：搜索完成且未被阻断，但未找到该 ASIN。
-- `blocked`：浏览器结果报告 `blocked=true`。
-- `failed`：任务最终失败，或结果文件接收与校验失败。
-- `not_executed`：本次运行结束前尚未执行该关键词。
-
-自然排名取该 ASIN 所有数值型 `naturalRank` 的最小值。广告位置取没有 `naturalRank` 且 `adType` 非空的记录中最小的 `rank`。`best_overall_position` 取目标 ASIN 所有出现记录中最小的 `rank`。缺失排名保持为空。
-
-HTML 报告内嵌本地交互所需的全部已转义排名历史，并通过 HTTPS 内容分发网络加载优麦云官方标志、Tailwind CSS、Remix Icon 和 ECharts。完整显示样式及交互图表需要联网；外部依赖加载失败时，内嵌表格与数据仍应可读，并显示明确的依赖加载警告。
-
-报告将每项指标与同一关键词上一次有数值的观测进行比较。差值为正表示排名改善，因为排名数字越小越好。缺失、失败、页面阻断和未执行的数据点在图表上保持断开；ECharts 使用 `connectNulls=false` 和反向排名轴，使第 1 名位于顶部。
+自然排名取该 ASIN 的最小 naturalRank；广告位置取没有自然排名且 adType 非空的记录中最小 rank；总体位置取所有出现记录的最小 rank。状态为 ok/not_found/blocked/failed/not_executed。HTML 内嵌经过转义的历史数据，图表使用反向排名轴和 `connectNulls=false`。

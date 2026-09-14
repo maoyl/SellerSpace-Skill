@@ -467,48 +467,288 @@ export function renderDashboardHtml({
   </div>
 </main>
 <script>
-const history=${safeData};
-const byKeyword=new Map();
-for(const row of history){if(!byKeyword.has(row.keyword))byKeyword.set(row.keyword,[]);byKeyword.get(row.keyword).push(row)}
-for(const values of byKeyword.values())values.sort((a,b)=>String(a.collected_at).localeCompare(String(b.collected_at)));
-const runTimes=new Map();for(const row of history){const time=Date.parse(row.collected_at)||0;runTimes.set(row.run_id,Math.max(time,runTimes.get(row.run_id)||0))}
-const sortedRuns=[...runTimes.entries()].sort((a,b)=>b[1]-a[1]);
-const latestRun=sortedRuns[0]?.[0];
-const previousRun=sortedRuns[1]?.[0];
-const latestRows=history.filter(row=>row.run_id===latestRun);
-const number=value=>value===""||value==null||!Number.isFinite(Number(value))?null:Number(value);
-const rankText=value=>number(value)==null?"—":String(number(value));
-const deltaFor=(values,field)=>{const latest=values.at(-1);const current=number(latest?.[field]);if(current==null)return null;for(let index=values.length-2;index>=0;index--){const previous=number(values[index][field]);if(previous!=null)return previous-current}return null};
-const previousFor=(values,field)=>{for(let index=values.length-2;index>=0;index--){const value=number(values[index][field]);if(value!=null)return value}return null};
-const deltaText=value=>value==null?"—":value===0?"持平":value>0?"↑ "+value:"↓ "+Math.abs(value);
-const deltaClass=value=>value==null||value===0?"muted":value>0?"good":"bad";
-const latestByKeyword=[...byKeyword.entries()].map(([keyword,values])=>({keyword,values,latest:values.at(-1),naturalDelta:deltaFor(values,"natural_rank"),adDelta:deltaFor(values,"best_ad_position")}));
-const statusLabels={ok:"成功",not_found:"未找到",blocked:"页面阻断",failed:"失败",not_executed:"未执行"};
-const statusIcons={ok:"ri-checkbox-circle-line",not_found:"ri-question-line",blocked:"ri-shield-keyhole-line",failed:"ri-error-warning-line",not_executed:"ri-time-line"};
-const countStatuses=rows=>{const counts={ok:0,not_found:0,blocked:0,failed:0,not_executed:0};for(const row of rows)counts[row.status]=(counts[row.status]||0)+1;return counts};
-const statusCounts=countStatuses(latestRows);
-const previousCounts=countStatuses(history.filter(row=>row.run_id===previousRun));
-const summaryData=["ok","not_found","blocked","failed","not_executed"];
-document.getElementById("summary").replaceChildren(...summaryData.map(key=>{const item=document.createElement("div");item.className="summary-item";const kicker=document.createElement("div");kicker.className="summary-kicker";const icon=document.createElement("i");icon.className="summary-icon "+key+" "+statusIcons[key];icon.setAttribute("aria-hidden","true");const label=document.createElement("span");label.textContent=statusLabels[key];kicker.append(icon,label);const value=document.createElement("div");value.className="summary-value";value.textContent=statusCounts[key]||0;const compare=document.createElement("div");compare.className="summary-compare";const difference=(statusCounts[key]||0)-(previousCounts[key]||0);compare.textContent=previousRun?"较上次 "+(difference===0?"0":difference>0?"+"+difference:String(difference)):"首次运行";item.append(kicker,value,compare);return item}));
-const latestTimestamp=Math.max(0,...latestRows.map(row=>Date.parse(row.collected_at)||0));
-document.getElementById("updatedAt").textContent="最后更新："+(latestTimestamp?new Date(latestTimestamp).toLocaleString():"—");
-let selectedKeyword=latestByKeyword.find(item=>number(item.latest.natural_rank)!=null&&number(item.latest.best_ad_position)!=null)?.keyword||latestByKeyword[0]?.keyword||"";
-let selectedDays=0;
-let chartInstance=null;
-const keywordList=document.getElementById("keywordList");
-const keywordSearch=document.getElementById("keywordSearch");
-function statusNode(status){const wrap=document.createElement("span");wrap.className="status-inline";const dot=document.createElement("i");dot.className="status-dot "+status;dot.setAttribute("aria-hidden","true");const text=document.createElement("span");text.textContent=statusLabels[status]||status||"—";wrap.append(dot,text);return wrap}
-function renderKeywordList(){const needle=keywordSearch.value.trim().toLocaleLowerCase();const visible=latestByKeyword.filter(item=>item.keyword.toLocaleLowerCase().includes(needle));keywordList.replaceChildren(...visible.map(item=>{const button=document.createElement("button");button.type="button";button.className="keyword-item";button.dataset.keyword=item.keyword;button.setAttribute("aria-current",String(item.keyword===selectedKeyword));const name=document.createElement("span");name.className="keyword-name";name.textContent=item.keyword;const rank=document.createElement("span");rank.className="rank-cell";const rankValue=document.createElement("span");rankValue.textContent=rankText(item.latest.natural_rank);rank.append(rankValue);if(item.naturalDelta!=null&&item.naturalDelta!==0){const change=document.createElement("span");change.className="delta "+deltaClass(item.naturalDelta);change.textContent=item.naturalDelta>0?"↑"+item.naturalDelta:"↓"+Math.abs(item.naturalDelta);rank.append(change)}const status=document.createElement("span");status.className="status-cell";status.append(statusNode(item.latest.status));const arrow=document.createElement("i");arrow.className="ri-arrow-right-s-line";arrow.setAttribute("aria-hidden","true");button.append(name,rank,status,arrow);button.addEventListener("click",()=>{selectedKeyword=item.keyword;renderKeywordList();renderSelected()});return button}));document.getElementById("keywordCount").textContent="共 "+visible.length+" 个关键词"}
-keywordSearch.addEventListener("input",renderKeywordList);
-function setDelta(id,value){const element=document.getElementById(id);element.textContent=deltaText(value);element.className="delta "+deltaClass(value)}
-function filteredValues(values){if(!selectedDays||!values.length)return values;const latest=Math.max(...values.map(row=>Date.parse(row.collected_at)||0));const since=latest-selectedDays*86400000;return values.filter(row=>(Date.parse(row.collected_at)||0)>=since)}
-function cell(text,className=""){const element=document.createElement("td");element.textContent=text;element.className=className;return element}
-function renderSelected(){const item=latestByKeyword.find(candidate=>candidate.keyword===selectedKeyword);if(!item)return;const latest=item.latest;document.getElementById("selectedKeyword").textContent=item.keyword;document.getElementById("selectedKeywordDetail").textContent=item.keyword;document.getElementById("naturalRank").textContent=rankText(latest.natural_rank);document.getElementById("adRank").textContent=rankText(latest.best_ad_position);setDelta("naturalDelta",item.naturalDelta);setDelta("adDelta",item.adDelta);document.getElementById("naturalPrevious").textContent="上次 "+rankText(previousFor(item.values,"natural_rank"));document.getElementById("adPrevious").textContent="上次 "+rankText(previousFor(item.values,"best_ad_position"));document.getElementById("adTypes").textContent=latest.ad_types||"—";const selectedStatus=document.getElementById("selectedStatus");selectedStatus.replaceChildren(statusNode(latest.status));document.getElementById("selectedTime").textContent=latest.collected_at?new Date(latest.collected_at).toLocaleString():"—";const values=filteredValues(item.values);drawChart(values,item.keyword);renderHistory(values)}
-function renderHistory(values){const recent=[...values].reverse().slice(0,8);document.getElementById("historyCount").textContent="(最近 "+recent.length+" 次采集)";const tbody=document.getElementById("historyRows");tbody.replaceChildren(...recent.map((row,index)=>{const chronologicalIndex=values.length-1-index;const priorValues=values.slice(0,chronologicalIndex+1);const naturalDelta=deltaFor(priorValues,"natural_rank");const adDelta=deltaFor(priorValues,"best_ad_position");const tr=document.createElement("tr");const status=document.createElement("td");status.append(statusNode(row.status));tr.append(cell(row.collected_at?new Date(row.collected_at).toLocaleString():"—"),status,cell(rankText(row.natural_rank),"natural-text"),cell(deltaText(naturalDelta),"delta "+deltaClass(naturalDelta)),cell(rankText(row.best_ad_position),"ad-text"),cell(deltaText(adDelta),"delta "+deltaClass(adDelta)),cell(row.ad_types||"—"));return tr}))}
-function drawChart(values,keyword){const chartElement=document.getElementById("rankChart");const empty=document.getElementById("emptyChart");chartElement.setAttribute("aria-label",keyword+"自然排名与广告位置趋势图");const ranks=values.flatMap(row=>[number(row.natural_rank),number(row.best_ad_position)]).filter(value=>value!=null);empty.hidden=ranks.length>0;if(!window.echarts){document.getElementById("dependencyAlert").classList.add("visible");return}if(!chartInstance)chartInstance=window.echarts.init(chartElement,null,{renderer:"canvas"});if(!ranks.length){chartInstance.clear();return}const maxRank=Math.max(10,Math.ceil(Math.max(...ranks)/10)*10);const labels=values.map(row=>new Date(row.collected_at).toLocaleDateString());const natural=values.map(row=>number(row.natural_rank));const ads=values.map(row=>number(row.best_ad_position));chartInstance.setOption({animationDuration:450,color:["#776ff6","#f26a21"],grid:{left:46,right:28,top:34,bottom:42,containLabel:false},tooltip:{trigger:"axis",backgroundColor:"rgba(17,24,39,.96)",borderWidth:0,padding:[9,11],textStyle:{color:"#fff",fontSize:12},valueFormatter:value=>value==null?"未采集":"排名 "+value},xAxis:{type:"category",boundaryGap:false,data:labels,axisLine:{lineStyle:{color:"#d0d5dd"}},axisTick:{show:false},axisLabel:{color:"#667085",fontSize:11,hideOverlap:true,margin:14}},yAxis:{type:"value",inverse:true,min:1,max:maxRank,splitNumber:5,axisLine:{show:false},axisTick:{show:false},axisLabel:{color:"#667085",fontSize:11},splitLine:{lineStyle:{color:"#e9edf3",type:"dashed"}}},series:[{name:"自然排名",type:"line",data:natural,connectNulls:false,symbol:"circle",symbolSize:8,showSymbol:true,lineStyle:{width:3,color:"#776ff6"},itemStyle:{color:"#776ff6",borderColor:"#fff",borderWidth:2},label:{show:values.length<=10,position:"bottom",color:"#5b54d6",fontSize:11,fontWeight:700,formatter:params=>params.value==null?"":params.value},emphasis:{focus:"series"}},{name:"广告位置",type:"line",data:ads,connectNulls:false,symbol:"circle",symbolSize:8,showSymbol:true,lineStyle:{width:3,color:"#f26a21"},itemStyle:{color:"#f26a21",borderColor:"#fff",borderWidth:2},label:{show:values.length<=10,position:"top",color:"#d94f0d",fontSize:11,fontWeight:700,formatter:params=>params.value==null?"":params.value},emphasis:{focus:"series"}}]},true)}
-for(const button of document.querySelectorAll(".range-button")){button.addEventListener("click",()=>{selectedDays=Number(button.dataset.days)||0;for(const candidate of document.querySelectorAll(".range-button"))candidate.setAttribute("aria-pressed",String(candidate===button));renderSelected()})}
-window.addEventListener("resize",()=>chartInstance?.resize());
-if(!window.echarts)document.getElementById("dependencyAlert").classList.add("visible");
+const history = ${safeData};
+const byKeyword = new Map();
+for (const row of history) {
+  const key = row.keyword_key || row.keyword.trim().normalize("NFKC").toLocaleLowerCase("en-US");
+  if (!byKeyword.has(key))
+    byKeyword.set(key, []);
+  byKeyword.get(key).push(row);
+}
+for (const values of byKeyword.values())
+  values.sort((a, b) => (Date.parse(a.collected_at) || 0) - (Date.parse(b.collected_at) || 0));
+const runTimes = new Map();
+for (const row of history) {
+  const time = Date.parse(row.collected_at) || 0;
+  runTimes.set(row.run_id, Math.max(time, runTimes.get(row.run_id) || 0));
+}
+const sortedRuns = [...runTimes.entries()].sort((a, b) => b[1] - a[1]);
+const latestRun = sortedRuns[0]?.[0];
+const previousRun = sortedRuns[1]?.[0];
+const latestRows = history.filter(row => row.run_id === latestRun);
+const number = value => value === "" || value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+const rankText = value => number(value) == null ? "—" : String(number(value));
+const deltaFor = (values, field) => {
+  const latest = values.at(-1);
+  const current = number(latest?.[field]);
+  if (current == null)
+    return null;
+  for (let index = values.length - 2; index >= 0; index--) {
+    const previous = number(values[index][field]);
+    if (previous != null)
+      return previous - current;
+  }
+  return null;
+};
+const previousFor = (values, field) => {
+  for (let index = values.length - 2; index >= 0; index--) {
+    const value = number(values[index][field]);
+    if (value != null)
+      return value;
+  }
+  return null;
+};
+const deltaText = value => value == null ? "—" : value === 0 ? "持平" : value > 0 ? "↑ " + value : "↓ " + Math.abs(value);
+const deltaClass = value => value == null || value === 0 ? "muted" : value > 0 ? "good" : "bad";
+const latestByKeyword = [...byKeyword.entries()].map(([key, values]) => ({
+  key, keyword: values.at(-1).keyword, values, latest: values.at(-1), naturalDelta: deltaFor(values, "natural_rank"), adDelta: deltaFor(values, "best_ad_position")
+}));
+const statusLabels = {
+  ok: "成功", not_found: "未找到", blocked: "页面阻断", failed: "失败", not_executed: "未执行"
+};
+const statusIcons = {
+  ok: "ri-checkbox-circle-line", not_found: "ri-question-line", blocked: "ri-shield-keyhole-line", failed: "ri-error-warning-line", not_executed: "ri-time-line"
+};
+const countStatuses = rows => {
+  const counts = {
+    ok: 0, not_found: 0, blocked: 0, failed: 0, not_executed: 0
+  };
+  for (const row of rows)
+    counts[row.status] = (counts[row.status] || 0) + 1;
+  return counts;
+};
+const statusCounts = countStatuses(latestRows);
+const previousCounts = countStatuses(history.filter(row => row.run_id === previousRun));
+const summaryData = ["ok", "not_found", "blocked", "failed", "not_executed"];
+document.getElementById("summary").replaceChildren(...summaryData.map(key => {
+  const item = document.createElement("div");
+  item.className = "summary-item";
+  const kicker = document.createElement("div");
+  kicker.className = "summary-kicker";
+  const icon = document.createElement("i");
+  icon.className = "summary-icon " + key + " " + statusIcons[key];
+  icon.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.textContent = statusLabels[key];
+  kicker.append(icon, label);
+  const value = document.createElement("div");
+  value.className = "summary-value";
+  value.textContent = statusCounts[key] || 0;
+  const compare = document.createElement("div");
+  compare.className = "summary-compare";
+  const difference = (statusCounts[key] || 0) - (previousCounts[key] || 0);
+  compare.textContent = previousRun ? "较上次 " + (difference === 0 ? "0" : difference > 0 ? "+" + difference : String(difference)) : "首次运行";
+  item.append(kicker, value, compare);
+  return item;
+}));
+const latestTimestamp = Math.max(0, ...latestRows.map(row => Date.parse(row.collected_at) || 0));
+document.getElementById("updatedAt").textContent = "最后更新：" + (latestTimestamp ? new Date(latestTimestamp).toLocaleString() : "—");
+let selectedKeyword = latestByKeyword.find(item => number(item.latest.natural_rank) != null && number(item.latest.best_ad_position) != null)?.keyword || latestByKeyword[0]?.keyword || "";
+let selectedDays = 0;
+let chartInstance = null;
+const keywordList = document.getElementById("keywordList");
+const keywordSearch = document.getElementById("keywordSearch");
+function statusNode(status) {
+  const wrap = document.createElement("span");
+  wrap.className = "status-inline";
+  const dot = document.createElement("i");
+  dot.className = "status-dot " + status;
+  dot.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span");
+  text.textContent = statusLabels[status] || status || "—";
+  wrap.append(dot, text);
+  return wrap;
+}
+function renderKeywordList() {
+  const needle = keywordSearch.value.trim().toLocaleLowerCase();
+  const visible = latestByKeyword.filter(item => item.keyword.toLocaleLowerCase().includes(needle));
+  keywordList.replaceChildren(...visible.map(item => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "keyword-item";
+    button.dataset.keyword = item.keyword;
+    button.setAttribute("aria-current", String(item.keyword === selectedKeyword));
+    const name = document.createElement("span");
+    name.className = "keyword-name";
+    name.textContent = item.keyword;
+    const rank = document.createElement("span");
+    rank.className = "rank-cell";
+    const rankValue = document.createElement("span");
+    rankValue.textContent = rankText(item.latest.natural_rank);
+    rank.append(rankValue);
+    if (item.naturalDelta != null && item.naturalDelta !== 0) {
+      const change = document.createElement("span");
+      change.className = "delta " + deltaClass(item.naturalDelta);
+      change.textContent = item.naturalDelta > 0 ? "↑" + item.naturalDelta : "↓" + Math.abs(item.naturalDelta);
+      rank.append(change);
+    }
+    const status = document.createElement("span");
+    status.className = "status-cell";
+    status.append(statusNode(item.latest.status));
+    const arrow = document.createElement("i");
+    arrow.className = "ri-arrow-right-s-line";
+    arrow.setAttribute("aria-hidden", "true");
+    button.append(name, rank, status, arrow);
+    button.addEventListener("click", () => {
+      selectedKeyword = item.keyword;
+      renderKeywordList();
+      renderSelected();
+    });
+    return button;
+  }));
+  document.getElementById("keywordCount").textContent = "共 " + visible.length + " 个关键词";
+}
+keywordSearch.addEventListener("input", renderKeywordList);
+function setDelta(id, value) {
+  const element = document.getElementById(id);
+  element.textContent = deltaText(value);
+  element.className = "delta " + deltaClass(value);
+}
+function filteredValues(values) {
+  if (!selectedDays || !values.length)
+    return values;
+  const latest = Math.max(...values.map(row => Date.parse(row.collected_at) || 0));
+  const since = latest - selectedDays * 86400000;
+  return values.filter(row => (Date.parse(row.collected_at) || 0) >= since);
+}
+function cell(text, className = "") {
+  const element = document.createElement("td");
+  element.textContent = text;
+  element.className = className;
+  return element;
+}
+function renderSelected() {
+  const item = latestByKeyword.find(candidate => candidate.keyword === selectedKeyword);
+  if (!item)
+    return;
+  const latest = item.latest;
+  document.getElementById("selectedKeyword").textContent = item.keyword;
+  document.getElementById("selectedKeywordDetail").textContent = item.keyword;
+  document.getElementById("naturalRank").textContent = rankText(latest.natural_rank);
+  document.getElementById("adRank").textContent = rankText(latest.best_ad_position);
+  setDelta("naturalDelta", item.naturalDelta);
+  setDelta("adDelta", item.adDelta);
+  document.getElementById("naturalPrevious").textContent = "上次 " + rankText(previousFor(item.values, "natural_rank"));
+  document.getElementById("adPrevious").textContent = "上次 " + rankText(previousFor(item.values, "best_ad_position"));
+  document.getElementById("adTypes").textContent = latest.ad_types || "—";
+  const selectedStatus = document.getElementById("selectedStatus");
+  selectedStatus.replaceChildren(statusNode(latest.status));
+  document.getElementById("selectedTime").textContent = latest.collected_at ? new Date(latest.collected_at).toLocaleString() : "—";
+  const values = filteredValues(item.values);
+  drawChart(values, item.keyword);
+  renderHistory(values, item.values);
+}
+function renderHistory(values, allValues) {
+  const recent = [...values].reverse().slice(0, 8);
+  document.getElementById("historyCount").textContent = "(最近 " + recent.length + " 次采集)";
+  const tbody = document.getElementById("historyRows");
+  tbody.replaceChildren(...recent.map((row, index) => {
+    const chronologicalIndex = allValues.indexOf(row);
+    const priorValues = allValues.slice(0, chronologicalIndex + 1);
+    const naturalDelta = deltaFor(priorValues, "natural_rank");
+    const adDelta = deltaFor(priorValues, "best_ad_position");
+    const tr = document.createElement("tr");
+    const status = document.createElement("td");
+    status.append(statusNode(row.status));
+    tr.append(cell(row.collected_at ? new Date(row.collected_at).toLocaleString() : "—"), status, cell(rankText(row.natural_rank), "natural-text"), cell(deltaText(naturalDelta), "delta " + deltaClass(naturalDelta)), cell(rankText(row.best_ad_position), "ad-text"), cell(deltaText(adDelta), "delta " + deltaClass(adDelta)), cell(row.ad_types || "—"));
+    return tr;
+  }));
+}
+function drawChart(values, keyword) {
+  const chartElement = document.getElementById("rankChart");
+  const empty = document.getElementById("emptyChart");
+  chartElement.setAttribute("aria-label", keyword + "自然排名与广告位置趋势图");
+  const ranks = values.flatMap(row => [number(row.natural_rank), number(row.best_ad_position)]).filter(value => value != null);
+  empty.hidden = ranks.length > 0;
+  if (!window.echarts) {
+    document.getElementById("dependencyAlert").classList.add("visible");
+    return;
+  }
+  if (!chartInstance)
+    chartInstance = window.echarts.init(chartElement, null, {
+      renderer: "canvas"
+    });
+  if (!ranks.length) {
+    chartInstance.clear();
+    return;
+  }
+  const maxRank = Math.max(10, Math.ceil(Math.max(...ranks) / 10) * 10);
+  const labels = values.map(row => new Date(row.collected_at).toLocaleDateString());
+  const natural = values.map(row => number(row.natural_rank));
+  const ads = values.map(row => number(row.best_ad_position));
+  chartInstance.setOption({
+    animationDuration: 450, color: ["#776ff6", "#f26a21"], grid: {
+      left: 46, right: 28, top: 34, bottom: 42, containLabel: false
+    }, tooltip: {
+      trigger: "axis", backgroundColor: "rgba(17,24,39,.96)", borderWidth: 0, padding: [9, 11], textStyle: {
+        color: "#fff", fontSize: 12
+      }, valueFormatter: value => value == null ? "未采集" : "排名 " + value
+    }, xAxis: {
+      type: "category", boundaryGap: false, data: labels, axisLine: {
+        lineStyle: {
+          color: "#d0d5dd"
+        }
+      }, axisTick: {
+        show: false
+      }, axisLabel: {
+        color: "#667085", fontSize: 11, hideOverlap: true, margin: 14
+      }
+    }, yAxis: {
+      type: "value", inverse: true, min: 1, max: maxRank, splitNumber: 5, axisLine: {
+        show: false
+      }, axisTick: {
+        show: false
+      }, axisLabel: {
+        color: "#667085", fontSize: 11
+      }, splitLine: {
+        lineStyle: {
+          color: "#e9edf3", type: "dashed"
+        }
+      }
+    }, series: [{
+        name: "自然排名", type: "line", data: natural, connectNulls: false, symbol: "circle", symbolSize: 8, showSymbol: true, lineStyle: {
+          width: 3, color: "#776ff6"
+        }, itemStyle: {
+          color: "#776ff6", borderColor: "#fff", borderWidth: 2
+        }, label: {
+          show: values.length <= 10, position: "bottom", color: "#5b54d6", fontSize: 11, fontWeight: 700, formatter: params => params.value == null ? "" : params.value
+        }, emphasis: {
+          focus: "series"
+        }
+      }, {
+        name: "广告位置", type: "line", data: ads, connectNulls: false, symbol: "circle", symbolSize: 8, showSymbol: true, lineStyle: {
+          width: 3, color: "#f26a21"
+        }, itemStyle: {
+          color: "#f26a21", borderColor: "#fff", borderWidth: 2
+        }, label: {
+          show: values.length <= 10, position: "top", color: "#d94f0d", fontSize: 11, fontWeight: 700, formatter: params => params.value == null ? "" : params.value
+        }, emphasis: {
+          focus: "series"
+        }
+      }]
+  }, true);
+}
+for (const button of document.querySelectorAll(".range-button")) {
+  button.addEventListener("click", () => {
+    selectedDays = Number(button.dataset.days) || 0;
+    for (const candidate of document.querySelectorAll(".range-button"))
+      candidate.setAttribute("aria-pressed", String(candidate === button));
+    renderSelected();
+  });
+}
+window.addEventListener("resize", () => chartInstance?.resize());
+if (!window.echarts)
+  document.getElementById("dependencyAlert").classList.add("visible");
 renderKeywordList();
 renderSelected();
 </script>
