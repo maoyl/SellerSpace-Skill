@@ -102,7 +102,7 @@ function validateTopic(topic) {
   return { id: topic.id, label: topic.label.trim(), kind: topic.kind, domain: topic.domain };
 }
 
-export function acceptBatch(batch, payload, existingTopics) {
+export function acceptBatch(batch, payload, existingTopics, options = {}) {
   requireValue(payload.batch_id === batch.batch_id && Array.isArray(payload.annotations)
     && payload.annotations.length === batch.units.length, "BATCH_MISMATCH", "分析批次或标注数量不符");
   requireValue(payload.topics === undefined || Array.isArray(payload.topics), "INVALID_TOPIC", "topics 必须为数组");
@@ -125,11 +125,12 @@ export function acceptBatch(batch, payload, existingTopics) {
         && selected(observation.severity, ["normal", "functional", "safety"]), "INVALID_OBSERVATION", "观察需引用有效主题、情绪和严重程度");
       requireValue(text(observation.quote).trim() && unit.text.includes(observation.quote)
         && observation.quote.length <= 1200, "INVALID_EVIDENCE", "证据必须是本分段连续原文，且不超过 1200 字符");
-      requireValue(text(observation.interpretation).trim(), "INVALID_EVIDENCE", "每条证据需要中文解释");
+      requireValue(options.compact || text(observation.interpretation).trim(), "INVALID_EVIDENCE", "每条证据需要中文解释");
       return { topic_id: observation.topic_id, polarity: observation.polarity, severity: observation.severity,
         field: unit.field, quote: observation.quote, interpretation: observation.interpretation };
     });
-    annotations[item.unit_id] = { review_key: unit.review_key, sentiment: item.sentiment, observations };
+    annotations[item.unit_id] = { review_key: unit.review_key, sentiment: item.sentiment, observations,
+      ...(options.compact ? { uncertain: item.uncertain === true, assessment: text(item.assessment).slice(0, 1200) } : {}) };
   }
   return { topics: [...topics.values()], annotations };
 }

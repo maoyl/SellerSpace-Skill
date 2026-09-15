@@ -3,6 +3,12 @@ import { safeJson } from "./analysis-core.mjs";
 // No network, fonts, chart libraries, or remote images are required by the report.
 export function renderReportHtml(report) {
   const { annotations, topics, ...data } = report;
+  data.review_assessments = {};
+  for (const annotation of Object.values(annotations ?? {})) {
+    if (!annotation.assessment?.trim() || !annotation.review_key) continue;
+    const values = data.review_assessments[annotation.review_key] ??= [];
+    if (!values.includes(annotation.assessment)) values.push(annotation.assessment);
+  }
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SellerSpace · 评论分析</title><style>
@@ -13,16 +19,16 @@ header{background:#fff;border-bottom:1px solid var(--line);padding:19px 34px;dis
 @media print{body{background:white;font-size:11px}header{padding:0 0 10px}aside,.filters,.pager,button,.scope-select{display:none!important}.shell{display:block}main{padding:16px 0}section{margin-top:22px}.card{break-inside:avoid;border-radius:0;padding:12px}.grid{gap:10px}.stats{grid-template-columns:repeat(4,1fr)}.scroll{overflow:visible}.review .body{max-height:none;overflow:visible}.track{print-color-adjust:exact}.notice{print-color-adjust:exact}h1{font-size:26px}.matrix td,.matrix th{padding:6px}.matrix button{display:inline!important}a{color:inherit}.quote{white-space:normal}}
 </style></head><body>
 <header><div class="brand"><span>SellerSpace</span> · 评论分析</div><div><span class="eyebrow">VOICE OF CUSTOMER</span> <button id="print">打印 / PDF</button></div></header>
-<div class="shell"><aside><nav aria-label="报告导航"><a href="#overview">01　核心结论</a><a href="#themes">02　好评与痛点</a><a href="#contexts">03　动机与需求</a><a href="#comparison">04　ASIN 对比</a><a href="#actions">05　行动建议</a><a href="#evidence">06　评论证据</a><a href="#method">07　分析口径</a></nav><div class="nav-note">从用户原话出发。<br>每个数字均来自已分析样本。</div></aside>
+<div class="shell"><aside><nav aria-label="报告导航"><a href="#overview">01　核心结论</a><a href="#themes">02　好评与痛点</a><a href="#contexts">03　动机与需求</a><a href="#comparison">04　ASIN 对比</a><a href="#actions">05　行动建议</a><a href="#evidence">06　评论证据</a><a href="#method">07　分析口径</a></nav><div class="nav-note">从用户原话出发。<br>采集与分析进度分别展示。</div></aside>
 <main><div class="intro"><div><div class="kicker">REVIEW ANALYSIS</div><h1>把用户反馈，变成下一步行动</h1><p class="muted small" id="meta"></p></div><label>分析范围 <select id="scope" class="scope-select" aria-label="分析范围"></select></label></div>
-<div id="banner"></div><div id="stats" class="grid stats"></div>
+<div id="banner"></div><div id="stats" class="grid stats"></div><div id="analysis-progress" class="card coverage" aria-live="polite"></div>
 <section id="overview"><div class="section-head"><h2>核心结论</h2><span class="muted small">观察、解释与建议均可核对</span></div><div id="summary" class="grid two"></div><details class="card coverage"><summary>查看采集覆盖与星级分布</summary><div id="coverage" class="scroll"></div></details></section>
 <section id="themes"><div class="section-head"><h2>用户满意什么，又被什么困扰</h2><span class="muted small">点击主题查看原始评论</span></div><div class="grid two"><div class="card"><h3>好评卖点</h3><div id="praise"></div></div><div class="card"><h3>差评痛点</h3><div id="pain"></div></div></div></section>
 <section id="contexts"><div class="section-head"><h2>购买动机、使用场景与未满足需求</h2></div><div class="grid three"><div class="card"><h3>为什么买</h3><div id="motivation"></div></div><div class="card"><h3>在哪里、如何使用</h3><div id="scenario"></div></div><div class="card"><h3>还希望获得什么</h3><div id="need"></div></div></div></section>
 <section id="comparison"><div class="section-head"><h2>多个 ASIN 的共性与差异</h2><span class="muted small">比较已观察到的反馈，不评定商品优劣</span></div><div id="overlap"></div><div class="card scroll" id="matrix"></div><div id="comparison-findings" class="grid two" style="margin-top:15px"></div></section>
 <section id="actions"><div class="section-head"><h2>产品与运营行动清单</h2><span class="muted small">按优先级展示，实施前核验产品事实</span></div><div id="findings" class="grid two"></div></section>
 <section id="evidence"><div class="section-head"><h2>回到原始评论</h2><span class="muted small" id="evidence-count"></span></div><div class="card"><div class="filters"><select id="star" aria-label="星级筛选"><option value="">全部星级</option><option value="1">1 星</option><option value="2">2 星</option><option value="3">3 星</option><option value="4">4 星</option><option value="5">5 星</option><option value="unknown">未知星级</option></select><select id="topic" aria-label="主题筛选"></select><input id="search" type="search" placeholder="搜索标题、正文、ASIN 或评论 ID" aria-label="搜索评论"><button id="clear">清除证据筛选</button></div><p id="evidence-focus" class="muted small"></p><div id="reviews"></div><div class="pager"><button id="previous">上一页</button><span class="muted small" id="page-info"></span><button id="next">下一页</button></div></div></section>
-<section id="method"><div class="section-head"><h2>这些结论应该怎样使用</h2></div><div class="card method"><ul><li>数据来自 Amazon 页面实际可见的评论，包含星级筛选和 recent 排序。样本占比不是商品真实差评率、故障率或市场占有率。</li><li>主题计数按评论去重，同一评论可涉及多个主题；混合意见可同时计入正面和负面，比例之和不要求等于 100%。</li><li>全范围主题次数按站点和 reviewId 去重；各 ASIN 内分别计数。共享评论可能来自变体，不能视为独立竞品证据。</li><li>星级分布使用采集到的评论，主题与文本情绪只使用完成全部分段分析的评论。未知值保留未知，不填成零或负面。</li><li>购买动机、人群和场景仅依据评论明确表述。建议是待核验的行动方向；未采集 Listing，不能据此认定当前页面存在遗漏。</li><li>每个 ASIN 独立拥有采集预算。下载、分析和报告生成时间另计；采集不完整和未执行的 ASIN 会单独标明。</li><li>报告不推算销量或转化率收益，不将个别评论当作普遍事实，不输出质量变化趋势。评论和翻译由 AI 辅助理解，重要结论请点击证据复核。</li><li>报告核心内容完全离线可用；Amazon 原文链接需要联网。打印保留主要结论与当前评论证据页，完整原始评论保存在 reviews.csv 和 raw 目录。</li></ul></div></section>
+<section id="method"><div class="section-head"><h2>这些结论应该怎样使用</h2></div><div class="card method"><ul><li>数据来自 Amazon 页面实际可见的评论，包含星级筛选和 recent 排序。样本占比不是商品真实差评率、故障率或市场占有率。</li><li>主题计数按评论去重，同一评论可涉及多个主题；混合意见可同时计入正面和负面，比例之和不要求等于 100%。</li><li>全范围主题次数按站点和 reviewId 去重；各 ASIN 内分别计数。共享评论可能来自变体，不能视为独立竞品证据。</li><li>星级分布使用采集到的评论，主题与文本情绪只使用完成整条标注的评论；草稿中的标注完成不代表重点复核和最终结论已完成。未知值保留未知，不填成零或负面。</li><li>购买动机、人群和场景仅依据评论明确表述。建议是待核验的行动方向；未采集 Listing，不能据此认定当前页面存在遗漏。</li><li>每个 ASIN 独立拥有采集预算。下载、分析和报告生成时间另计；采集不完整和未执行的 ASIN 会单独标明。</li><li>报告不推算销量或转化率收益，不将个别评论当作普遍事实，不输出质量变化趋势。主题和重点解释由 AI 辅助理解，普通证据仅保留主题与原文；重要结论请点击证据复核。</li><li>报告核心内容完全离线可用；Amazon 原文链接需要联网。打印保留主要结论与当前评论证据页，完整原始评论保存在 reviews.csv 和 raw 目录。</li></ul></div></section>
 <footer id="footer"></footer></main></div>
 <script type="application/json" id="report-data">${safeJson(data)}</script><script>(${reportClient.toString()})();</script></body></html>`;
 }
@@ -40,7 +46,8 @@ export function reportClient() {
   const kindLabels = { pain: "痛点", praise: "卖点", motivation: "动机", scenario: "场景", need: "需求" };
   const stops = { target_reached: "达到条数目标", visible_set_exhausted: "可见集合已耗尽", platform_limited: "平台限制", time_budget_reached: "达到时间预算", page_load_timeout: "页面加载超时", captcha: "需要验证码", login_required: "需要登录", page_unsupported: "页面不支持", filter_not_applied: "筛选未生效", slice_quota_reached: "达到切片配额" };
   const sentiments = { positive: "正面", negative: "负面", mixed: "褒贬混合", neutral: "中性", unknown: "未知" };
-  const topics = new Map(data.stats.topics.map((t) => [t.id, t]));
+  const progress = data.analysis_progress;
+  const compact = progress?.format === "compact-v2";
   const topicKeySets = new Map(data.stats.topics.map((t) => [t.id, new Set(t.review_keys)]));
   const evidenceMap = new Map();
   for (const topic of data.stats.topics) for (const e of topic.evidence) {
@@ -80,14 +87,20 @@ export function reportClient() {
     const analyzed = selected.reduce((sum, r) => sum + r.analyzed, 0);
     const tasks = scope ? data.tasks.filter((t) => t.asin === scope) : data.tasks;
     const gaps = tasks.filter((t) => !t.reliable).length;
-    el("stats").innerHTML = [["采集评论记录", rows.length], ["完成分析的记录", analyzed], ["已识别主题", data.stats.topics.filter((t) => topicStats(t).count).length], ["存在覆盖缺口的 ASIN", gaps]].map(([label, value]) => `<div class="card"><div class="stat-label">${label}</div><div class="stat-number">${number(value)}</div></div>`).join("");
+    el("stats").innerHTML = [["采集评论记录", rows.length], [compact ? "完成轻量标注的记录" : "完成分析的记录", analyzed], ["已识别主题", data.stats.topics.filter((t) => topicStats(t).count).length], ["存在覆盖缺口的 ASIN", gaps]].map(([label, value]) => `<div class="card"><div class="stat-label">${label}</div><div class="stat-number">${number(value)}</div></div>`).join("");
+    const globalAnalyzed = data.stats.analyzed_count;
+    const globalCollected = data.stats.collected_count;
+    const reviewStage = !progress?.label_complete ? "等待全量标注完成" : `${number(progress.reviewed_evidence)} / ${number(progress.total_evidence)} 项 · ${progress.insights_complete ? "已完成" : "进行中"}`;
+    el("analysis-progress").innerHTML = compact
+      ? `<h3>分析进度 <span class="small muted">本次运行 · 不随 ASIN 筛选变化</span></h3><div class="grid three"><div><strong>全量轻量标注</strong><p>${number(globalAnalyzed)} / ${number(globalCollected)} 条记录 · ${progress.label_complete ? "已完成" : "进行中"}</p></div><div><strong>重点证据复核</strong><p>${reviewStage}</p></div><div><strong>缓存复用</strong><p>${number(progress.cache_reused ?? 0)} 条记录</p></div></div><p class="small muted">普通证据保留主题与原文；重点证据附中文解释。缓存复用已有标注，不代表跳过本次重点复核。</p>`
+      : `<h3>分析进度</h3><p>已完成 ${number(globalAnalyzed)} / ${number(globalCollected)} 条评论记录的分段分析。</p>`;
     el("banner").innerHTML = (data.example ? '<div class="notice draft"><strong>示例报告 · 模拟数据</strong> · 所有评论和建议仅用于展示交互，不可用于经营判断。</div>' : "")
-      + (data.draft ? '<div class="notice draft"><strong>分析草稿</strong> · 尚未发布最终报告；当前数字只包括已完成全部分段分析的评论。</div>' : "")
+      + (data.draft ? `<div class="notice draft"><strong>分析草稿</strong> · 尚未发布最终报告；采集数量包含未分析记录，主题统计只包括完成整条${compact ? "轻量标注" : "分段分析"}的评论。${compact ? "轻量标注、重点复核和最终结论为不同阶段。" : ""}</div>` : "")
       + (gaps || data.interrupted ? `<div class="notice">本次为部分可见样本，${gaps} 个 ASIN 存在采集覆盖缺口${data.interrupted ? "，运行曾中断" : ""}。主题占比仅描述本次样本，不代表商品真实差评率。</div>` : '<div class="notice">本次已耗尽请求切片的可见评论；这不代表取得 Amazon 全部历史评论。主题占比仅描述本次样本。</div>');
     const currentFindings = data.findings.map((f, i) => ({ f, i })).filter(({ f }) => !scope || f.asins.includes(scope));
     for (const [id, predicate] of [["summary", (f) => f.section === "summary"], ["findings", (f) => !["summary", "comparison"].includes(f.section)], ["comparison-findings", (f) => f.section === "comparison"]]) {
       const items = currentFindings.filter(({ f }) => predicate(f)).sort((a, b) => a.f.priority.localeCompare(b.f.priority));
-      el(id).innerHTML = items.length ? items.map(({ f, i }) => findingCard(f, i)).join("") : empty();
+      el(id).innerHTML = items.length ? items.map(({ f, i }) => findingCard(f, i)).join("") : empty(data.draft ? "结论尚未生成；当前可查看已标注主题和原始证据。" : undefined);
     }
     el("coverage").innerHTML = '<table><thead><tr><th>ASIN</th><th>评论数</th><th>1 / 2 / 3 / 4 / 5 / 未知星</th><th>采集状态</th><th>实际切片</th></tr></thead><tbody>' + tasks.map((t) => {
       const r = data.stats.by_asin.find((v) => v.asin === t.asin);
@@ -111,13 +124,14 @@ export function reportClient() {
   function renderReviews() {
     const rows = filteredReviews(); const pages = Math.max(1, Math.ceil(rows.length / pageSize)); page = Math.min(page, pages - 1);
     el("evidence-count").textContent = `符合筛选 ${number(rows.length)} 条 · 每页最多 ${pageSize} 条`;
-    el("evidence-focus").textContent = focusKeys ? `当前仅查看「${focusTitle}」引用的评论；上方结论基于完整分析样本。` : "下方筛选只影响证据列表，不重新生成上方结论。";
+    el("evidence-focus").textContent = focusKeys ? `当前仅查看「${focusTitle}」引用的评论；上方结论基于${data.draft ? "当前已分析" : "完整分析"}样本。` : "下方筛选只影响证据列表，不重新生成上方结论。";
     el("reviews").innerHTML = rows.slice(page * pageSize, (page + 1) * pageSize).map((r) => {
       const analysis = data.stats.review_analysis[r.key];
       const evidence = (evidenceMap.get(r.key) ?? []).filter((e) => !el("topic").value || e.topic_id === el("topic").value);
       let url = ""; try { if (new URL(r.source_url).protocol === "https:") url = r.source_url; } catch { /* omit malformed source */ }
-      const interpretation = evidence.map((e) => `<div class="interpretation"><strong>${esc(e.label)}</strong> · ${esc(e.interpretation)}<div class="quote">${esc(e.quote)}</div></div>`).join("");
-      return `<article class="review"><div class="review-top"><div><span class="tag">${esc(r.requested_asin)}</span><span class="tag ${r.rating && r.rating <= 3 ? "bad" : ""}">${r.rating ?? "未知"} 星</span><span class="tag">${analysis ? esc(sentiments[analysis.sentiment]) : "未完成分析"}</span>${r.verified_purchase === true ? '<span class="tag good">认证购买</span>' : ""}</div>${url ? `<a class="small" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Amazon 原文 ↗</a>` : ""}</div><h3>${esc(r.title || "无标题")}</h3><p class="small muted">${esc(r.review_id)} · ${esc(r.review_date || "日期未知")}${r.review_asin ? ` · 评论变体 ${esc(r.review_asin)}` : ""}</p><p class="body">${esc(r.content.slice(0, 600) || "无正文")}</p>${r.content.length > 600 ? `<details><summary>展开完整正文（${number(r.content.length)} 字符）</summary><div class="body">${esc(r.content)}</div></details>` : ""}${interpretation}</article>`;
+      const interpretation = evidence.map((e) => `<div class="interpretation"><strong>${esc(e.label)}</strong>${e.interpretation?.trim() ? `${compact ? ' <span class="tag">重点复核</span>' : ""}<p>${esc(e.interpretation)}</p>` : ""}<div class="quote">${esc(e.quote)}</div></div>`).join("");
+      const assessment = (data.review_assessments?.[r.key] ?? []).map((text) => `<div class="interpretation"><strong>不确定项复核</strong><p>${esc(text)}</p></div>`).join("");
+      return `<article class="review"><div class="review-top"><div><span class="tag">${esc(r.requested_asin)}</span><span class="tag ${r.rating && r.rating <= 3 ? "bad" : ""}">${r.rating ?? "未知"} 星</span><span class="tag">${analysis ? esc(sentiments[analysis.sentiment]) : compact ? "未完成轻量标注" : "未完成分析"}</span>${r.verified_purchase === true ? '<span class="tag good">认证购买</span>' : ""}</div>${url ? `<a class="small" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Amazon 原文 ↗</a>` : ""}</div><h3>${esc(r.title || "无标题")}</h3><p class="small muted">${esc(r.review_id)} · ${esc(r.review_date || "日期未知")}${r.review_asin ? ` · 评论变体 ${esc(r.review_asin)}` : ""}</p><p class="body">${esc(r.content.slice(0, 600) || "无正文")}</p>${r.content.length > 600 ? `<details><summary>展开完整正文（${number(r.content.length)} 字符）</summary><div class="body">${esc(r.content)}</div></details>` : ""}${interpretation}${assessment}</article>`;
     }).join("") || empty("没有符合当前筛选的评论。");
     el("page-info").textContent = `第 ${page + 1} / ${pages} 页`;
     el("previous").disabled = page === 0; el("next").disabled = page + 1 >= pages;

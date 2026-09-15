@@ -1,9 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import os from "node:os";
 import { pathToFileURL } from "node:url";
 import { ACTION_ID, validatePreflight, downloadBrowserArtifact } from "./review-source.mjs";
-import { AnalysisError, requireValue, STARS, MARKETS, normalizeResult, nextBatch, acceptBatch, mergeTopics, aggregate, representativeEvidence, validateFindings, hash, csv } from "./analysis-core.mjs";
+import { AnalysisError, requireValue, STARS, MARKETS, normalizeResult, reviewUnits, nextBatch, acceptBatch, mergeTopics, aggregate, representativeEvidence, validateFindings, hash, csv } from "./analysis-core.mjs";
+import { ANALYSIS_FORMAT, nextFastBatch, acceptFastBatch, nextInsightBatch, acceptInsights } from "./analysis-fast.mjs";
+import { restoreCache, storeCache } from "./analysis-cache.mjs";
 import { withProjectLock, readJsonIfExists, writeJson, writeAtomic } from "./local-store.mjs";
 import { renderReportHtml } from "./render-report.mjs";
 
@@ -12,6 +15,13 @@ const terminal = (task) => ["completed", "failed", "skipped"].includes(task.stat
 const fatal = (code) => /LOGIN|CAPTCHA|BLOCKED|OFFLINE|AUTH|UNAUTHORIZED|SUBMISSION_UNKNOWN|TASK_NOT_FOUND|POLL_TIMEOUT|TRANSPORT/i.test(code ?? "");
 const requiredOutput = (input) => { requireValue(typeof input.output_dir === "string" && input.output_dir.trim(), "MISSING_OUTPUT", "必须指定 output_dir"); return path.resolve(input.output_dir); };
 const safeError = (error) => ({ code: String(error?.code ?? "ACTION_FAILED").slice(0, 150), message: String(error?.message ?? "操作失败").replace(/https?:\/\/\S+/g, "[URL]").slice(0, 1000) });
+const fast = (run) => run.settings.analysis_format === ANALYSIS_FORMAT;
+const cacheDirectory = (value) => value === false ? false : typeof value === "string" && value.trim() ? path.resolve(value)
+  : path.join(os.homedir(), ".cache", "sellerspace-review-analysis", "v2");
+const analysisBatch = (run, reviews) => {
+  const batch = (fast(run) ? nextFastBatch : nextBatch)(reviews, run.annotations, run.topics);
+  return fast(run) ? { ...batch, batch_id: hash([batch.batch_id, run.analysis_epoch ?? 0]) } : batch;
+};
 
 function taskParams(run, task) {
   return { asin: task.asin, marketplace: run.marketplace, crawlMode: "snapshot", starFilters: [...STARS],
@@ -25,7 +35,7 @@ export async function prepareRun(input, options = {}) {
   const rawConfig = input.config_path ? JSON.parse(await readFile(path.resolve(input.config_path), "utf8")) : {};
   const config = { ...rawConfig, ...input };
   const base = input.config_path ? path.dirname(path.resolve(input.config_path)) : process.cwd();
-  for (const field of ["asins_file", "output_dir"]) if (config[field]) config[field] = path.resolve(Object.hasOwn(input, field) ? process.cwd() : base, config[field]);
+  for (const field of ["asins_file", "output_dir", "cache_dir"]) if (typeof config[field] === "string" && config[field]) config[field] = path.resolve(Object.hasOwn(input, field) ? process.cwd() : base, config[field]);
   requireValue(!config.browser_id || config.browser_id === receipt.browser_id, "BROWSER_SELECTION_MISMATCH", "指定浏览器与预检不符");
   requireValue(Object.hasOwn(MARKETS, config.marketplace), "INVALID_MARKETPLACE", "marketplace 必须为插件支持的站点 code");
   requireValue([config.asin, config.asins, config.asins_file].filter((v) => v != null).length === 1,
@@ -40,14 +50,20 @@ export async function prepareRun(input, options = {}) {
   requireValue(Number.isInteger(timeout) && timeout >= 30000 && timeout <= 600000, "INVALID_BUDGET", "每个 ASIN 的 timeout_ms 必须为 30000–600000");
   requireValue(max === null || Number.isSafeInteger(max) && max > 0, "INVALID_BUDGET", "max_reviews 省略或为 null 表示不限；其他值必须为正整数");
   const output = requiredOutput(config);
+  const format = config.analysis_format ?? ANALYSIS_FORMAT;
+  requireValue([ANALYSIS_FORMAT, "legacy-v1"].includes(format), "INVALID_ANALYSIS_FORMAT", "analysis_format 必须为 compact-v2 或 legacy-v1");
+  requireValue(config.cache_dir === undefined || config.cache_dir === false || typeof config.cache_dir === "string" && config.cache_dir.trim(),
+    "INVALID_CACHE_DIR", "cache_dir 必须为路径或 false");
   return withProjectLock(output, async () => {
     requireValue(!await readJsonIfExists(path.join(output, "run.json")), "RUN_EXISTS", "目录已有运行；请恢复该运行或使用新目录");
     const run = { schema_version: 1, run_id: randomUUID(), created_at: timestamp(options), marketplace: config.marketplace,
-      settings: { timeout_ms: timeout, max_reviews: max }, preflight: receipt, stopped: false, interrupted: false,
+      settings: { timeout_ms: timeout, max_reviews: max, analysis_format: format,
+        cache_dir: format === ANALYSIS_FORMAT ? cacheDirectory(config.cache_dir) : false }, preflight: receipt, stopped: false, interrupted: false,
       tasks: values.map((asin, index) => ({ index, asin, status: "pending", attempts: [], spent_ms: 0 })),
       topics: [], annotations: {}, recorded_batches: {}, findings: [], analysis_revision: 0, findings_revision: null };
     await writeJson(path.join(output, "run.json"), run);
     return { ok: true, output_dir: output, run_id: run.run_id, browser_id: receipt.browser_id,
+      analysis_format: format, cache_dir: run.settings.cache_dir,
       asin_count: values.length, per_asin_timeout_ms: timeout, total_collection_budget_ms: values.length * timeout };
   }, true);
 }
@@ -92,7 +108,39 @@ function progress(run) {
     stop_reason: run.stop_reason ?? null, interrupted: run.interrupted, finalized_at: run.finalized_at ?? null,
     tasks: run.tasks.map(({ index, asin, status, claim_id, attempts, spent_ms, collected_count, error }) =>
       ({ index, asin, status, claim_id, job_id: attempts.at(-1)?.job_id ?? null, attempts: attempts.map(({ params, ...rest }) => rest), spent_ms, collected_count, error })),
+    analysis_format: run.settings.analysis_format ?? "legacy-v1", cache_reused: run.cache_reused ?? 0,
+    draft_path: run.draft_path ?? null,
     analyzed_units: Object.keys(run.annotations).length, topic_count: run.topics.length, analysis_revision: run.analysis_revision };
+}
+
+async function writeReport(output, run, reviews, options, draft) {
+  const stats = aggregate(reviews, run.topics, run.annotations, run.tasks);
+  const insight = fast(run) && stats.analysis_complete ? nextInsightBatch(reviews, run.topics, run.annotations, run.tasks) : null;
+  const { cache_dir, ...reportSettings } = run.settings;
+  const report = { schema_version: 1, run_id: run.run_id, created_at: run.created_at, marketplace: run.marketplace,
+    settings: reportSettings, interrupted: run.interrupted, draft, generated_at: timestamp(options),
+    analysis_progress: { format: run.settings.analysis_format ?? "legacy-v1", cache_reused: run.cache_reused ?? 0,
+      label_complete: stats.analysis_complete, insights_complete: insight?.done ?? !fast(run),
+      reviewed_evidence: insight?.reviewed_evidence ?? 0, total_evidence: insight?.total_evidence ?? 0 },
+    tasks: run.tasks.map(({ asin, status, coverage, slices, reliable, error, captured_at }) =>
+      ({ asin, status, coverage, slices, reliable, error, captured_at })),
+    reviews, stats, annotations: run.annotations, topics: run.topics, findings: run.findings };
+  const reportPath = path.join(output, draft ? "draft.html" : "report.html");
+  const analysisPath = path.join(output, draft ? "analysis-draft.json" : "analysis.json");
+  await writeJson(analysisPath, report);
+  await writeAtomic(path.join(output, "reviews.csv"), csv(reviews));
+  await writeAtomic(reportPath, renderReportHtml(report));
+  return { ok: true, draft, collected: stats.collected_count, analyzed: stats.analyzed_count,
+    report_path: reportPath, csv_path: path.join(output, "reviews.csv"), analysis_path: analysisPath };
+}
+
+async function refreshDraft(output, run, reviews, options) {
+  try {
+    run.draft_path = (await writeReport(output, run, reviews, options, true)).report_path;
+    await writeJson(path.join(output, "run.json"), run);
+    return { draft_path: run.draft_path };
+  }
+  catch (error) { return { draft_error: safeError(error) }; }
 }
 
 export async function command(name, input, options = {}) {
@@ -100,7 +148,15 @@ export async function command(name, input, options = {}) {
   // Rebuilding/analyzing previously collected files is offline; resume collection checks live receipt.
   const receipt = name === "resume-run" ? validatePreflight(input.preflight) : null;
   const output = requiredOutput(input);
-  if (name === "status-run") return progress(await load(output));
+  if (name === "status-run") {
+    const run = await load(output);
+    if (!run.tasks.every(terminal)) return progress(run);
+    const reviews = await allReviews(output, run);
+    const stats = aggregate(reviews, run.topics, run.annotations, run.tasks);
+    const insight = fast(run) && stats.analysis_complete ? nextInsightBatch(reviews, run.topics, run.annotations, run.tasks) : null;
+    return { ...progress(run), collected_reviews: stats.collected_count, analyzed_reviews: stats.analyzed_count,
+      pending_reviews: stats.collected_count - stats.analyzed_count, pending_insights: insight?.pending_evidence ?? null };
+  }
   return withProjectLock(output, async () => {
     const run = await load(output);
     if (input.run_id) requireValue(input.run_id === run.run_id, "RUN_MISMATCH", "run_id 与目录不符");
@@ -199,9 +255,38 @@ export async function command(name, input, options = {}) {
     }
     requireValue(run.tasks.every(terminal), "COLLECTION_PENDING", "先结束采集再分析，避免数据范围在分析期间变化");
     const reviews = await allReviews(output, run);
+    if (name === "optimize-run") {
+      mutable();
+      requireValue(input.cache_dir === undefined || input.cache_dir === false || typeof input.cache_dir === "string" && input.cache_dir.trim(),
+        "INVALID_CACHE_DIR", "cache_dir 必须为路径或 false");
+      run.settings.analysis_format = ANALYSIS_FORMAT;
+      run.settings.cache_dir = cacheDirectory(input.cache_dir ?? run.settings.cache_dir);
+      run.analysis_epoch = (run.analysis_epoch ?? 0) + 1;
+      run.cache_checked = false;
+      run.analysis_revision++; run.findings = []; run.findings_revision = null;
+      await save(); return { ...progress(run), next_action: "next-analysis-batch" };
+    }
+    if (name === "reopen-reviews") {
+      mutable();
+      requireValue(Array.isArray(input.review_keys) && input.review_keys.length && input.review_keys.every((key) => reviews.some((r) => r.key === key)),
+        "INVALID_REVIEW_KEYS", "仅重开本次已采集的指定评论");
+      const selected = new Set(input.review_keys);
+      for (const unit of reviewUnits(reviews.filter((r) => selected.has(r.key)))) delete run.annotations[unit.unit_id];
+      run.cache_excluded = [...new Set([...(run.cache_excluded ?? []), ...selected])];
+      run.analysis_epoch = (run.analysis_epoch ?? 0) + 1;
+      run.recorded_batches = {}; run.analysis_revision++; run.findings = []; run.findings_revision = null;
+      await save(); return { ok: true, reopened: selected.size, next_action: "next-analysis-batch",
+        ...(fast(run) ? await refreshDraft(output, run, reviews, options) : {}) };
+    }
     if (name === "next-analysis-batch") {
       mutable();
-      return nextBatch(reviews, run.annotations, run.topics);
+      let cache;
+      if (fast(run) && !run.cache_checked) {
+        cache = await restoreCache(run, reviews); run.cache_checked = true; await save();
+        if (cache.restored) await refreshDraft(output, run, reviews, options);
+      }
+      const batch = analysisBatch(run, reviews);
+      return { ...batch, ...(cache ? { cache } : {}), ...(batch.done && fast(run) ? { next_action: "next-insight-batch" } : {}) };
     }
     if (name === "record-analysis") {
       mutable();
@@ -209,20 +294,43 @@ export async function command(name, input, options = {}) {
       requireValue(payload && typeof payload === "object" && !Array.isArray(payload), "INVALID_ANALYSIS", "需要 analysis 对象");
       const digest = hash(payload);
       if (run.recorded_batches?.[payload.batch_id] === digest) return { ok: true, idempotent: true };
-      const batch = nextBatch(reviews, run.annotations, run.topics);
+      const batch = analysisBatch(run, reviews);
       requireValue(!batch.done, "ANALYSIS_ALREADY_COMPLETE", "没有待分析分段");
-      const accepted = acceptBatch(batch, payload, run.topics);
+      const accepted = fast(run) ? acceptFastBatch(batch, payload, reviews, run.annotations, run.topics) : acceptBatch(batch, payload, run.topics);
       run.topics = accepted.topics; Object.assign(run.annotations, accepted.annotations);
       run.analysis_revision++; run.findings = []; run.findings_revision = null;
       run.recorded_batches ??= {}; run.recorded_batches[batch.batch_id] = digest;
-      await save(); return { ok: true, ...aggregate(reviews, run.topics, run.annotations, run.tasks).by_asin.reduce((acc, s) => ({ analyzed: acc.analyzed + s.analyzed, collected: acc.collected + s.collected }), { analyzed: 0, collected: 0 }) };
+      await save();
+      const stats = aggregate(reviews, run.topics, run.annotations, run.tasks);
+      const changed = new Set(Object.values(accepted.annotations).map((a) => a.review_key));
+      return { ok: true, analyzed: stats.analyzed_count, collected: stats.collected_count,
+        ...(fast(run) ? { cache: await storeCache(run, reviews.filter((r) => changed.has(r.key))),
+          ...await refreshDraft(output, run, reviews, options), next_action: stats.analysis_complete ? "next-insight-batch" : "next-analysis-batch" } : {}) };
     }
     if (name === "merge-topics") {
       mutable();
       const merged = mergeTopics(run.topics, run.annotations, input.mappings);
       run.topics = merged.topics; run.annotations = merged.annotations;
       run.analysis_revision++; run.findings = []; run.findings_revision = null;
-      await save(); return { ok: true, topics: run.topics };
+      await save(); return { ok: true, topics: run.topics,
+        ...(fast(run) ? { cache: await storeCache(run, reviews), ...await refreshDraft(output, run, reviews, options) } : {}) };
+    }
+    if (name === "next-insight-batch" || name === "record-insights") {
+      mutable();
+      requireValue(fast(run), "LEGACY_ANALYSIS", "旧版运行可直接 analysis-summary，或先 optimize-run");
+      const batch = nextInsightBatch(reviews, run.topics, run.annotations, run.tasks);
+      if (name === "next-insight-batch") return { ...batch, ...(batch.done ? { next_action: "analysis-summary" } : {}) };
+      const payload = input.analysis; const digest = hash(payload ?? null);
+      const recorded = `insights:${payload?.batch_id}`;
+      if (run.recorded_batches?.[recorded] === digest) return { ok: true, idempotent: true };
+      requireValue(!batch.done, "INSIGHTS_ALREADY_COMPLETE", "重点证据已复核完成");
+      run.annotations = acceptInsights(batch, payload, run.annotations, reviews);
+      run.recorded_batches ??= {}; run.recorded_batches[recorded] = digest;
+      run.analysis_revision++; run.findings = []; run.findings_revision = null;
+      await save();
+      const changed = new Set(batch.units.map((u) => u.review_key));
+      return { ok: true, cache: await storeCache(run, reviews.filter((r) => changed.has(r.key))),
+        ...await refreshDraft(output, run, reviews, options) };
     }
     const stats = aggregate(reviews, run.topics, run.annotations, run.tasks);
     if (name === "analysis-summary") {
@@ -232,30 +340,23 @@ export async function command(name, input, options = {}) {
     }
     if (name === "record-findings") {
       mutable(); requireValue(stats.analysis_complete, "ANALYSIS_INCOMPLETE", "全部评论分析完成后再生成最终结论");
+      if (fast(run)) requireValue(nextInsightBatch(reviews, run.topics, run.annotations, run.tasks).done, "INSIGHTS_INCOMPLETE", "先完成重点证据复核");
       run.findings = validateFindings(input.findings, stats, reviews);
       run.findings_revision = run.analysis_revision;
-      await save(); return { ok: true, findings_count: run.findings.length };
+      await save(); return { ok: true, findings_count: run.findings.length,
+        ...(fast(run) ? await refreshDraft(output, run, reviews, options) : {}) };
     }
     if (name === "finalize-run" || name === "render-report") {
       if (name === "finalize-run") {
         requireValue(stats.analysis_complete, "ANALYSIS_INCOMPLETE", "分析未完成，不能将部分标注发布为最终报告");
+        if (fast(run)) requireValue(nextInsightBatch(reviews, run.topics, run.annotations, run.tasks).done, "INSIGHTS_INCOMPLETE", "先完成重点证据复核");
         requireValue(!stats.analyzed_count || run.findings_revision === run.analysis_revision, "FINDINGS_REQUIRED", "请先完成主题归并并 record-findings；确无建议可传空数组");
       }
       if (name === "render-report") requireValue(run.finalized_at || input.draft === true, "RUN_NOT_FINALIZED", "未归档运行仅允许 draft=true 预览");
-      const report = { schema_version: 1, run_id: run.run_id, created_at: run.created_at, marketplace: run.marketplace,
-        settings: run.settings, interrupted: run.interrupted, draft: !run.finalized_at && name === "render-report",
-        generated_at: timestamp(options), tasks: run.tasks.map(({ asin, status, coverage, slices, reliable, error, captured_at }) =>
-          ({ asin, status, coverage, slices, reliable, error, captured_at })),
-        reviews, stats, annotations: run.annotations, topics: run.topics, findings: run.findings };
       // Finalized marker is written last. Repeating finalize regenerates the same logical data.
-      const prefix = report.draft ? "draft" : "report";
-      await writeJson(path.join(output, report.draft ? "analysis-draft.json" : "analysis.json"), report);
-      await writeAtomic(path.join(output, "reviews.csv"), csv(reviews));
-      await writeAtomic(path.join(output, `${prefix}.html`), renderReportHtml(report));
+      const result = await writeReport(output, run, reviews, options, !run.finalized_at && name === "render-report");
       if (name === "finalize-run") { run.finalized_at ??= timestamp(options); await save(); }
-      return { ok: true, draft: report.draft, collected: stats.collected_count, analyzed: stats.analyzed_count,
-        report_path: path.join(output, `${prefix}.html`), csv_path: path.join(output, "reviews.csv"),
-        analysis_path: path.join(output, report.draft ? "analysis-draft.json" : "analysis.json") };
+      return result;
     }
     throw new AnalysisError("UNKNOWN_COMMAND", `未知命令：${name}`);
   });
