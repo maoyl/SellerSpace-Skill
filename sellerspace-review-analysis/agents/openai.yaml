@@ -1,0 +1,6 @@
+interface:
+  display_name: "SellerSpace 亚马逊评论分析"
+  short_description: "通过插件采集 ASIN 评论，分析产品与运营机会并生成含原文证据的离线 HTML"
+  default_prompt: "使用 $sellerspace-review-analysis 分析我提供的站点和 ASIN 评论，每个 ASIN 最多采集 10 分钟，输出产品与运营建议及离线 HTML 报告。"
+policy:
+  allow_implicit_invocation: true
