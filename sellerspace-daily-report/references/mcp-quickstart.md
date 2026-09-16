@@ -2,12 +2,12 @@
 
 ## 工具调用
 
-使用宿主实际提供的业务工具名称和 Schema。下文 `get_stores`、`query_store_performance`、`query_products`、`query_ads` 是能力名，不是要拼接的固定前缀。
+使用宿主实际提供的业务工具名称和 Schema。下文 `get_stores`、`query_store_performance`、`query_products`、`query_inventory`、`query_ads` 是能力名，不是要拼接的固定前缀。
 
 - 直接业务工具：传其业务参数；不额外套 `arguments`。
 - 仅在环境实际提供门面时：先取目标业务工具 Schema，再按门面定义包装执行参数。
 - `discover_capabilities({adsEntity:"campaign"})` 可返回广告完整参数；字段含义不确定时使用当前可用的 `discover_fields` 或 `includeFieldMeta`。不要因为缺少某个辅助工具就误判经营查询能力不存在。
-- 用 `selectFields` 精简响应时需同时设置 `includeSummary:true`，否则汇总/趋势/环比可能被省略；日报默认不用精确投影。
+- 用 `selectFields` 精简响应时需同时设置 `includeSummary:true`，否则汇总/趋势/环比可能被省略。经营查询默认不用精确投影；库存完整分页采用下方精简字段，首屏附字段元数据，后续页不必重复。
 
 ## 时间与查询示例
 
@@ -40,6 +40,38 @@
 - 广告总览用返回的 `summary`，不要把5条活动之和当总计。若汇总缺失，显示缺失并保留活动明细。
 - 多站点广告逐站点顺序查询；商品和店铺的合并查询必须具备可比较的日期和币种。跨站点合并后的趋势不能标为某一个站点的趋势。
 
+## 当前库存查询示例
+
+调用 `query_inventory`，不传 `period`。默认逐站点覆盖未删除的 FBA 商品，包含停售商品，不设置 `productSaleStatus` 或 `inventoryHealth` 筛选。下面是第一页，按实际 `ps` 分页继续获取；只查第一页不能生成全范围库龄统计。
+
+```json
+{
+  "multiStations": ["123-US"],
+  "fulfillment": "AFN",
+  "del": "N",
+  "groupByField": "SKU",
+  "page": 1,
+  "pageSize": 100,
+  "orderField": "sellerSku",
+  "orderFlag": 1,
+  "includeSummary": true,
+  "includeFieldMeta": true,
+  "selectFields": [
+    "id", "sellerId", "marketplace", "sellerSku", "fnSku", "fulfillment", "productStatus", "shareInventory",
+    "currency", "stockValue", "supplyTotal", "supplyInstock", "supplyInbound", "supplyReserved", "supplyUnavailable",
+    "salesUnits7d", "salesUnits30d", "salesVelocity", "estimateSaleDays", "estimateSaleDaysTotal", "inventoryHealth",
+    "preparationDays", "purchaseQuantity", "purchaseDate", "toFBAQuantity", "toFBAQuantityDate",
+    "inventoryAge0To30Days", "inventoryAge31To60Days", "inventoryAge61To90Days", "inventoryAge91To180Days",
+    "inventoryAge181To270Days", "inventoryAge271To365Days", "inventoryAge365PlusDays"
+  ]
+}
+```
+
+- 当前库存数量、可售天数、健康状态、库龄和补货建议统一由此查询。`AFN` 是请求参数，响应的 `fulfillment` 为 `FBA`；`MFN` 对应 `FBM`。
+- 请求列同时用于裁剪 `inventoryStatistics`，所以需要的汇总字段也必须选入。`stockValue/currency/shareInventory` 不是默认明细列；不用 `selectFields` 时通过 `includeFields` 追加。
+- 不把 `productSyncTime` 当库存更新时间，它表示商品信息同步时间；没有明确库存同步时间时只记录查询开始、结束时间并注明同步时效未知。
+- 完整分页、汇总与明细的覆盖差异、库龄分母和风险解释按 [库存与库龄分析](inventory-analysis.md) 执行。
+
 ## 拆解响应包装
 
 先检查 MCP 的 `isError`，再读取 `structuredContent`；没有结构化内容时解析 `content` 中的 JSON 文本块，跳过非 JSON 的提示文字。解析后还要检查包装层的业务失败标记，例如 `success:false` 或错误码；失败不能被当作空报表。
@@ -51,13 +83,14 @@ payload = { tool, request, data: { success, data: 业务数据 } }
 业务数据 = payload.data.data
 ```
 
-旧版或门面可能直接返回 `{success,data:业务数据}`、`{tool,data:业务数据}` 或业务数据本身。只沿已识别的外层包装拆解，通过目标结构（`summary/salesData`、`summary/pg`、`summary/list`）确认到达业务层后停止；不要递归删除所有名为 `data` 的字段或静默吞掉未知结构。
+旧版或门面可能直接返回 `{success,data:业务数据}`、`{tool,data:业务数据}` 或业务数据本身。只沿已识别的外层包装拆解，通过目标结构（`summary/salesData`、`summary/pg`、`summary/list`、`ps/inventoryStatistics`）确认到达业务层后停止；不要递归删除所有名为 `data` 的字段或静默吞掉未知结构。
 
 后文统一称拆解后的业务层为 `body`：
 
 - **店铺**：当前 `body.summary`；对应对比数据 `body.summary.chainSummary`、`body.summary.chainRate`。多站点明细是 `body.salesData[]`，每行自己的环比在 `row.chainSummary/chainRate`。不能拿总汇总的环比填站点行。嵌套对比缺失时从独立的前日/前7天查询结果取 `body.summary` 或对应站点行。
 - **商品**：全查询范围趋势 `body.summary.dateDims[]`；商品页 `body.pg.items[]`；分页信息在 `body.pg.currentPage/pageCount/totalCount`。不要取商品行内的 `dateDims` 当全店趋势。`summary` 缺失不代表第一页就是全部商品。
 - **广告**：筛选范围汇总 `body.summary`；活动页 `body.list.items[]`。
+- **库存**：明细 `body.ps.items[]`，分页 `body.ps.currentPage/pageCount/pageSize/totalCount`，筛选范围汇总 `body.inventoryStatistics`。它不是 `summary` 或 `pg`；库龄和健康状态计数不能假定在汇总中存在。
 - **店铺发现**：常见 `{success:true,data:[店铺...]}`，授权站点数组为 `authMarkets`，实际字段以返回为准；`marketplace/code` 是 US/DE 等站点代码，`timezone` 是站点时区。
 
 ## 字段与展示单位
