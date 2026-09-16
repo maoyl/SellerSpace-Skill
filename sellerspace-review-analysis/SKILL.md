@@ -20,11 +20,11 @@ description: 通过 SellerSpace MCP 和在线浏览器插件，采集同一 Amaz
 
 ## 实时预检
 
-沿用 `sellerspace-review-monitor` 的获取方式，但不要求用户安装另一个 Skill：
+评论由在线 SellerSpace 浏览器插件采集，宿主通过 SellerSpace MCP 提交 `amazon.product.reviews` 任务、查询状态并获取 Artifact 下载信息。采集前依次检查：
 
 1. 从当前可调用工具中发现 SellerSpace 的 `discover_capabilities`、`browser_list`、`browser_submit_task`、`browser_get_task`。支持宿主工具前缀；缺失时先搜索工具，仍不可用则说明原因并停止。
-2. `discover_capabilities({query:"亚马逊 ASIN 评论"})` 确认 `amazon.product.reviews` 只读，schema 提供 `crawlMode`、`starFilters`、`includeHelpful`、`knownReviewIds`、`knownReviewStreak`。
-3. `browser_list({})` 确认 Artifact 交付、`artifactSchemaVersion=1`；只选择在线、评论 Action 可用且 version>=4 的设备。
+2. 调用 `discover_capabilities({query:"亚马逊 ASIN 评论"})`，确认 `amazon.product.reviews` 的 `annotations.readOnly=true`，输入 schema 包含 `crawlMode`、`starFilters`、`includeHelpful`、`knownReviewIds`、`knownReviewStreak`。
+3. 调用 `browser_list({})`，确认 `taskDelivery.modes` 包含 `artifact`、`artifactSchemaVersion=1`；只选择 `online=true` 且评论 Action `available=true`、`version>=4` 的设备。
 4. 用户指定或会话已确认的设备优先；只有一个合格设备直接使用，多个无法确定时询问。指定设备不合格不能自行换设备。
 5. 根据本次真实工具响应组装 preflight，不得使用文档示例证明连接。预检失败不创建运行或报告。凭据失效时提示重新连接 MCP，不索取聊天中的 Key，不读取本地 MCP 凭据，不直连服务，不切换其他浏览器爬虫。
 
